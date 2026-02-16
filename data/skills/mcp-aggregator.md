@@ -1,6 +1,6 @@
 # MCP Aggregator Skill Guide
 
-This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection.
+This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection. The aggregator exposes both an **MCP tool interface** and an equivalent **REST API** — use whichever fits your client.
 
 ## When to Use the Aggregator
 
@@ -16,18 +16,22 @@ This server acts as a unified gateway to multiple downstream MCP servers. Instea
 4. **Invoke** — call `invoke_tool` with `serverName`, `toolName`, and `arguments` to execute a tool on the downstream server.
 5. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
+The same workflow applies via the REST API. Start with `GET /api` to get aggregator info and links, then use the REST endpoints listed in the Tool Reference table below.
+
 ## Tool Reference
 
-| Tool | Purpose |
-|------|---------|
-| `list_services` | Get a concise index of all servers and their tools |
-| `get_service_details` | Get full parameter schemas for a server's tools |
-| `get_service_skill` | Get the skill/usage guide for a server |
-| `invoke_tool` | Proxy a tool call to a downstream server |
-| `register_server` | Register a new downstream server (admin) |
-| `unregister_server` | Remove a registered server (admin) |
-| `update_skill` | Set or update a server's skill document (admin) |
-| `regenerate_summary` | Re-generate the AI summary for a server (admin) |
+| MCP Tool | REST Endpoint | Purpose |
+|----------|--------------|---------|
+| `list_services` | `GET /api/services` | Index of all servers and their tools |
+| `get_service_details` | `GET /api/services/{name}` | Full parameter schemas for a server's tools |
+| `get_service_skill` | `GET /api/services/{name}/skill` | Skill/usage guide for a server |
+| `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Proxy a tool call to a downstream server |
+| `register_server` | `POST /api/admin/services` | Register a new downstream server |
+| `unregister_server` | `DELETE /api/admin/services/{name}` | Remove a registered server |
+| `update_skill` | `PUT /api/admin/services/{name}/skill` | Set or update a server's skill document |
+| `regenerate_summary` | `POST /api/admin/services/{name}/regenerate-summary` | Re-generate the AI summary for a server |
+
+The REST API entry point is `GET /api`, which returns aggregator info and links to all endpoints.
 
 ## Calling invoke_tool
 
@@ -40,6 +44,17 @@ invoke_tool(
   toolName: "microsoft_docs_search",
   arguments: {"query": "dependency injection in ASP.NET Core"}
 )
+```
+
+## Calling via REST API
+
+The same invocation is available as an HTTP request:
+
+```
+POST /api/services/microsoft-learn/tools/microsoft_docs_search/invoke
+Content-Type: application/json
+
+{"arguments": "{\"query\": \"dependency injection in ASP.NET Core\"}"}
 ```
 
 ## Error Handling
