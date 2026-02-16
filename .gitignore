@@ -1,5 +1,6 @@
 bin/
 obj/
+publish/
 logs/
 .vs/
 *.user
