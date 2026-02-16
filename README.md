@@ -266,7 +266,8 @@ docker run -p 8080:8080 -v mcp-data:/data mcp-aggregator
 The container:
 - Exposes port 8080
 - Persists registry and skill data to the `/data` volume
-- Includes a health check at `/health` (30s interval)
+
+> **Important:** Server registrations and skill documents are stored in the data directory. If the volume is lost or reset, all registrations must be re-created. Use a persistent volume to retain data across restarts and redeployments.
 
 ### Docker Compose
 
@@ -286,6 +287,18 @@ services:
 volumes:
   mcp-data:
 ```
+
+### Kubernetes
+
+Kubernetes manifests are provided in the `k8s/` directory, targeting a k3s cluster with Longhorn storage and Tailscale ingress.
+
+```bash
+./k8s/build.sh          # Build and push Docker image
+./k8s/deploy.sh         # Apply manifests and copy skill documents
+./k8s/deploy.sh --restart  # Pull latest image without reapplying manifests
+```
+
+The deploy script automatically copies skill documents from `data/skills/` into the pod's persistent volume after each deployment. AI secrets (API keys) should be created directly via `kubectl create secret` — they are not stored in the manifests.
 
 ### Claude Code Integration
 

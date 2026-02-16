@@ -30,14 +30,14 @@ This server acts as a unified gateway to multiple downstream MCP servers. Instea
 
 ## Calling invoke_tool
 
-The `arguments` parameter must be a **JSON string**, not a raw JSON object. Serialize the arguments before passing them.
+Pass `arguments` as a JSON object with the tool's expected parameters.
 
 **Example:**
 ```
 invoke_tool(
   serverName: "microsoft-learn",
   toolName: "microsoft_docs_search",
-  arguments: "{\"query\": \"dependency injection in ASP.NET Core\"}"
+  arguments: {"query": "dependency injection in ASP.NET Core"}
 )
 ```
 
@@ -46,7 +46,6 @@ invoke_tool(
 - **Server unavailable:** If `list_services` shows a server with `available: false`, it means the downstream connection could not be established. Do not attempt `invoke_tool` calls against it — they will fail.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
 - **Slow first call:** Connections to downstream servers are lazy. The first `invoke_tool` call to a server may take longer as the connection is established. Subsequent calls will be faster.
-
 ## Tips
 
 - The `list_services` descriptions are AI-generated summaries that are concise and differentiated. These summaries are what you see when discovering servers, so they are worth keeping accurate (see `regenerate_summary` below).
@@ -61,14 +60,14 @@ Use `register_server` to add new downstream servers at runtime:
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `name` | Yes | Unique identifier for the server |
-| `transportType` | Yes | `"Stdio"` or `"Http"` |
-| `endpoint` | Yes | For Stdio: the command to run; for Http: the server URL |
+| `transportType` | Yes | `"Stdio"` or `"Http"`. Stdio servers must be installed and executable on the machine running the aggregator. |
+| `endpoint` | Yes | For Stdio: the command to run; for Http: the server URL. **The URL must be reachable from the aggregator's network**, not the client's — use cluster-internal DNS for k8s co-located servers. |
 | `arguments` | Stdio only | JSON array of command arguments |
 | `environment` | Stdio only | JSON object of environment variables |
 | `displayName` | No | Human-friendly name |
 | `description` | No | What the server does |
 
-An AI-generated summary is created automatically at registration time based on the server's tools.
+An AI-generated summary is created automatically at registration time based on the server's tools. Summary generation requires the AI backend to be configured on the aggregator (`McpAggregator:AI:Enabled = true` with a valid endpoint and API key). If AI is not configured, registration still succeeds but no summary is generated.
 
 ### Updating Skills
 
