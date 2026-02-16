@@ -109,6 +109,17 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
         app.MapMcp();
 
         // REST API
+        app.MapGet("/api", (IOptions<AggregatorOptions> opts) =>
+        {
+            var o = opts.Value;
+            return Results.Ok(new
+            {
+                name = o.SelfName,
+                description = o.SelfApiDescription,
+                api = "/api/services",
+                skill = $"/api/services/{o.SelfName}/skill"
+            });
+        });
         app.MapControllers();
 
         // OpenAPI + Scalar
