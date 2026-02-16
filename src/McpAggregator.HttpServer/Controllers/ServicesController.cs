@@ -1,6 +1,8 @@
+using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Tools;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace McpAggregator.HttpServer.Controllers;
 
@@ -12,17 +14,20 @@ public class ServicesController : ControllerBase
     private readonly ToolIndex _toolIndex;
     private readonly SkillStore _skillStore;
     private readonly ToolProxyHandler _proxy;
+    private readonly AggregatorOptions _options;
 
     public ServicesController(
         ServerRegistry registry,
         ToolIndex toolIndex,
         SkillStore skillStore,
-        ToolProxyHandler proxy)
+        ToolProxyHandler proxy,
+        IOptions<AggregatorOptions> options)
     {
         _registry = registry;
         _toolIndex = toolIndex;
         _skillStore = skillStore;
         _proxy = proxy;
+        _options = options.Value;
     }
 
     [HttpGet]
@@ -43,7 +48,8 @@ public class ServicesController : ControllerBase
     [HttpGet("{name}/skill")]
     public async Task<IActionResult> GetServiceSkill(string name, CancellationToken ct)
     {
-        _registry.Get(name); // Validate exists
+        if (!string.Equals(name, _options.SelfName, StringComparison.OrdinalIgnoreCase))
+            _registry.Get(name); // Validate exists for downstream servers
         var skill = await _skillStore.GetAsync(name, ct);
         if (skill is null)
             return NotFound(new { error = $"No skill document for '{name}'." });
