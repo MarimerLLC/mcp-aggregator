@@ -32,6 +32,9 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
 
         var builder = Host.CreateApplicationBuilder();
 
+        // Load user secrets regardless of environment
+        builder.Configuration.AddUserSecrets<ServeCommand>(optional: true);
+
         // CLI overrides for configuration
         if (settings.DataDir is not null)
             builder.Configuration[$"{AggregatorOptions.SectionName}:DataDirectory"] = settings.DataDir;

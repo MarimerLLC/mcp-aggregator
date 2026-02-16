@@ -55,6 +55,7 @@ public class AdminTools
             Transport = transport
         };
 
+        await registry.EnsureLoadedAsync(ct);
         await registry.RegisterAsync(server, ct);
 
         // Generate AI summary if available
@@ -77,6 +78,7 @@ public class AdminTools
         [Description("The name of the registered server")] string serverName,
         CancellationToken ct)
     {
+        await registry.EnsureLoadedAsync(ct);
         var server = registry.Get(serverName);
 
         if (!summaryGenerator.IsAvailable)
@@ -99,6 +101,7 @@ public class AdminTools
         [Description("The name of the server to remove")] string name,
         CancellationToken ct)
     {
+        await registry.EnsureLoadedAsync(ct);
         await connectionManager.DisconnectAsync(name);
         skillStore.Delete(name);
         await registry.UnregisterAsync(name, ct);
@@ -114,6 +117,7 @@ public class AdminTools
         [Description("Markdown content for the skill document")] string markdown,
         CancellationToken ct)
     {
+        await registry.EnsureLoadedAsync(ct);
         registry.Get(serverName); // Validate server exists
         await skillStore.SetAsync(serverName, markdown, ct);
         await registry.UpdateSkillFlagAsync(serverName, true, ct);

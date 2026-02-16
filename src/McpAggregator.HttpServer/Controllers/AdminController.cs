@@ -36,6 +36,7 @@ public class AdminController : ControllerBase
             Transport = request.Transport
         };
 
+        await _registry.EnsureLoadedAsync(ct);
         await _registry.RegisterAsync(server, ct);
 
         // Generate AI summary if available
@@ -107,6 +108,7 @@ public class AdminController : ControllerBase
     [HttpDelete("{name}")]
     public async Task<IActionResult> UnregisterServer(string name, CancellationToken ct)
     {
+        await _registry.EnsureLoadedAsync(ct);
         await _connectionManager.DisconnectAsync(name);
         _skillStore.Delete(name);
         await _registry.UnregisterAsync(name, ct);
@@ -116,6 +118,7 @@ public class AdminController : ControllerBase
     [HttpPut("{name}/skill")]
     public async Task<IActionResult> UpdateSkill(string name, [FromBody] UpdateSkillRequest request, CancellationToken ct)
     {
+        await _registry.EnsureLoadedAsync(ct);
         _registry.Get(name); // Validate exists
         await _skillStore.SetAsync(name, request.Markdown, ct);
         await _registry.UpdateSkillFlagAsync(name, true, ct);
