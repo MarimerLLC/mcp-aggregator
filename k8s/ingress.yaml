@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-aggregator
+  namespace: mcp-aggregator
+  annotations:
+    tailscale.com/hostname: mcp-aggregator
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: mcp-aggregator
+      port:
+        number: 80
+  tls:
+    - hosts:
+        - mcp-aggregator
