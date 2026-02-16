@@ -44,6 +44,24 @@ dotnet run --project src/McpAggregator.StdioServer
 
 Use this mode when configuring MCP Aggregator as a stdio server in Claude Code, Cursor, or similar tools.
 
+### CLI Options
+
+Both servers accept command-line switches that override appsettings and environment variables:
+
+| Option | Servers | Description |
+|--------|---------|-------------|
+| `--data-dir` | Both | Path to the data directory (registry, skills) |
+| `--log-dir` | Both | Path to the log directory |
+| `--port` | HTTP only | HTTP listen port |
+
+```bash
+# Run HTTP server on a custom port with explicit data directory
+dotnet run --project src/McpAggregator.HttpServer -- --port 5100 --data-dir /path/to/data
+
+# Run stdio server with explicit directories
+dotnet run --project src/McpAggregator.StdioServer -- --data-dir /path/to/data --log-dir /path/to/logs
+```
+
 ### Register a Downstream Server
 
 Once the aggregator is running, register downstream MCP servers using the `register_server` tool or the REST API.
@@ -159,6 +177,8 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 
 All settings can be overridden with environment variables using the `MCPAGGREGATOR__` prefix (e.g., `MCPAGGREGATOR__CONNECTIONIDLETIMEOUT=01:00:00`).
 
+**Precedence** (highest to lowest): CLI switches > environment variables > appsettings.json > defaults.
+
 ## Deployment
 
 ### Docker
@@ -201,7 +221,12 @@ Add the aggregator as a stdio MCP server in your Claude Code configuration:
   "mcpServers": {
     "aggregator": {
       "command": "dotnet",
-      "args": ["run", "--project", "/path/to/src/McpAggregator.StdioServer"]
+      "args": [
+        "run", "--project", "/path/to/src/McpAggregator.StdioServer",
+        "--",
+        "--data-dir", "/path/to/data",
+        "--log-dir", "/path/to/logs"
+      ]
     }
   }
 }
