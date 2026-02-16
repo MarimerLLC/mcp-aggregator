@@ -12,7 +12,7 @@ public class AggregatorOptions
     public TimeSpan DefaultToolTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     public string SelfName { get; set; } = "mcp-aggregator";
-    public string SelfDescription { get; set; } = "MCP Aggregator gateway — a single endpoint that proxies tool calls to multiple downstream MCP servers.";
+    public string SelfDescription { get; set; } = "MCP Aggregator gateway — proxies tool calls to multiple downstream MCP servers. IMPORTANT: call get_service_skill(serverName: \"mcp-aggregator\") first to get the full usage guide.";
 
     public string RegistryFilePath => Path.Combine(DataDirectory, RegistryFile);
     public string SkillsDirectoryPath => Path.Combine(DataDirectory, SkillsDirectory);
