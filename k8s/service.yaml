@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-aggregator
+  namespace: mcp-aggregator
+  labels:
+    app.kubernetes.io/component: service
+    app.kubernetes.io/name: mcp-aggregator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mcp-aggregator
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
