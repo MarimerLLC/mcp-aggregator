@@ -71,6 +71,7 @@ public sealed class ConnectionManager : IAsyncDisposable
                 return state.Client;
             }
 
+            await _registry.EnsureLoadedAsync(ct);
             var server = _registry.Get(serverName);
             if (!server.Enabled)
                 throw new ServerUnavailableException(serverName);
