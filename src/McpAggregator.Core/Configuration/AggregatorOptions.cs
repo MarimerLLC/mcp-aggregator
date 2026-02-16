@@ -11,6 +11,9 @@ public class AggregatorOptions
     public TimeSpan ConnectionIdleTimeout { get; set; } = TimeSpan.FromMinutes(30);
     public TimeSpan DefaultToolTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    public string SelfName { get; set; } = "mcp-aggregator";
+    public string SelfDescription { get; set; } = "MCP Aggregator gateway — a single endpoint that proxies tool calls to multiple downstream MCP servers.";
+
     public string RegistryFilePath => Path.Combine(DataDirectory, RegistryFile);
     public string SkillsDirectoryPath => Path.Combine(DataDirectory, SkillsDirectory);
 }

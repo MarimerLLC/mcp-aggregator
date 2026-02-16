@@ -116,6 +116,12 @@ curl -X POST http://localhost:8080/api/admin/services \
 4. It calls `invoke_tool` to proxy a tool call to the downstream server. The aggregator lazily connects to the downstream server on first use.
 5. Idle downstream connections are automatically closed after a configurable timeout.
 
+### Self-Describing Skill
+
+The aggregator automatically advertises itself in the `list_services` index when a skill document exists at `data/skills/{SelfName}.md` (default: `data/skills/mcp-aggregator.md`). This skill document is shipped with the project and teaches consuming LLMs the discover-drill down-invoke workflow without any manual setup.
+
+The aggregator's `SelfName` setting controls both the name shown in the index and which skill file is loaded. If you need to change it, update the `SelfName` in configuration and rename the skill file to match.
+
 ## MCP Tools
 
 | Tool | Description |
@@ -127,6 +133,7 @@ curl -X POST http://localhost:8080/api/admin/services \
 | `register_server` | Register a new downstream MCP server |
 | `unregister_server` | Remove a registered server |
 | `update_skill` | Set or update a server's skill document |
+| `regenerate_summary` | Re-generate the AI summary for a registered server |
 
 ## REST API
 
@@ -148,6 +155,7 @@ Available on the HTTP server only.
 | POST | `/api/admin/services` | Register a new server |
 | DELETE | `/api/admin/services/{name}` | Unregister a server |
 | PUT | `/api/admin/services/{name}/skill` | Set or update a skill document |
+| POST | `/api/admin/services/{name}/regenerate-summary` | Re-generate AI summary |
 
 ## Configuration
 
@@ -174,10 +182,77 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `IndexCacheTtl` | 5 minutes | How long to cache the service index |
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
+| `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
+| `SelfDescription` | *(built-in)* | Description shown for the aggregator in the service index |
 
 All settings can be overridden with environment variables using the `MCPAGGREGATOR__` prefix (e.g., `MCPAGGREGATOR__CONNECTIONIDLETIMEOUT=01:00:00`).
 
-**Precedence** (highest to lowest): CLI switches > environment variables > appsettings.json > defaults.
+**Precedence** (highest to lowest): CLI switches > environment variables > user secrets (Development) > appsettings.json > defaults.
+
+### AI-Generated Server Summaries
+
+When an LLM-compatible AI endpoint is configured, the aggregator generates concise server summaries at registration time. These summaries replace verbose or vague descriptions in the service index, helping consuming LLMs make better routing decisions.
+
+Summaries are generated once at registration and persisted. If the AI endpoint is unavailable or unconfigured, registration proceeds normally without a summary. You can regenerate a summary at any time via the `regenerate_summary` MCP tool or the `POST /api/admin/services/{name}/regenerate-summary` REST endpoint.
+
+#### Configuration
+
+Add an `AI` section under `McpAggregator` in `appsettings.json`:
+
+```json
+{
+  "McpAggregator": {
+    "AI": {
+      "Enabled": false,
+      "Endpoint": "",
+      "Model": "",
+      "ApiKey": ""
+    }
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `Enabled` | `false` | Set to `true` to enable AI summary generation |
+| `Endpoint` | | Base URL of the Azure AI Inference-compatible endpoint |
+| `Model` | `gpt-4.1` | Model name to use for summary generation |
+| `ApiKey` | | API key for the AI endpoint |
+| `Timeout` | 30 seconds | Timeout for the AI summary generation call |
+
+The AI endpoint must be compatible with the [Azure AI Inference SDK](https://www.nuget.org/packages/Azure.AI.Inference) (`ChatCompletionsClient`). This includes Azure AI Foundry, Azure OpenAI, and any endpoint that supports the Azure AI Inference chat completions API.
+
+> **Note:** The `Endpoint` should be the base URL up to (but not including) `/chat/completions`. The SDK appends that path automatically. For example, if the full completions URL is `https://my-service.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview`, set the endpoint to `https://my-service.services.ai.azure.com/models`.
+
+#### Using Environment Variables
+
+```bash
+export MCPAGGREGATOR__AI__ENABLED=true
+export MCPAGGREGATOR__AI__ENDPOINT=https://my-service.services.ai.azure.com/models
+export MCPAGGREGATOR__AI__MODEL=gpt-4.1
+export MCPAGGREGATOR__AI__APIKEY=your-api-key
+```
+
+#### Using .NET User Secrets (Recommended for Development)
+
+User secrets keep credentials out of source control and appsettings files:
+
+```bash
+# Initialize user secrets (one-time, per project)
+cd src/McpAggregator.HttpServer
+dotnet user-secrets init
+
+# Set AI configuration
+dotnet user-secrets set "McpAggregator:AI:Enabled" "true"
+dotnet user-secrets set "McpAggregator:AI:Endpoint" "https://my-service.services.ai.azure.com/models"
+dotnet user-secrets set "McpAggregator:AI:Model" "gpt-4.1"
+dotnet user-secrets set "McpAggregator:AI:ApiKey" "your-api-key"
+
+# Verify what's stored
+dotnet user-secrets list
+```
+
+Repeat for `McpAggregator.StdioServer` if you run that host with AI enabled.
 
 ## Deployment
 

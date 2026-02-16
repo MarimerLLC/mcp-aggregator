@@ -1,9 +1,13 @@
 using System.ComponentModel;
+using Azure.AI.Inference;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Tools;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Serilog;
 using Spectre.Console.Cli;
 
@@ -27,6 +31,9 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
         var logDir = settings.LogDir ?? Path.Combine(AppContext.BaseDirectory, "logs");
 
         var builder = Host.CreateApplicationBuilder();
+
+        // Load user secrets regardless of environment
+        builder.Configuration.AddUserSecrets<ServeCommand>(optional: true);
 
         // CLI overrides for configuration
         if (settings.DataDir is not null)
@@ -57,6 +64,19 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
 
         // Core services
         builder.Services.AddAggregatorCore(builder.Configuration);
+
+        // Conditionally register AI chat client for summary generation
+        var aiOptions = builder.Configuration.GetSection(AiOptions.SectionName).Get<AiOptions>();
+        if (aiOptions?.Enabled == true && !string.IsNullOrEmpty(aiOptions.Endpoint))
+        {
+            builder.Services.AddSingleton<IChatClient>(sp =>
+            {
+                var options = sp.GetRequiredService<IOptions<AiOptions>>().Value;
+                var credential = new Azure.AzureKeyCredential(options.ApiKey);
+                var inferenceClient = new ChatCompletionsClient(new Uri(options.Endpoint), credential);
+                return inferenceClient.AsIChatClient(options.Model);
+            });
+        }
 
         // MCP server with stdio transport
         builder.Services.AddMcpServer()

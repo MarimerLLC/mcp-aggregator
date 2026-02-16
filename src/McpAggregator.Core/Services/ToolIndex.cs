@@ -11,6 +11,7 @@ public class ToolIndex
 {
     private readonly ServerRegistry _registry;
     private readonly ConnectionManager _connectionManager;
+    private readonly SkillStore _skillStore;
     private readonly AggregatorOptions _options;
     private readonly ILogger<ToolIndex> _logger;
 
@@ -21,11 +22,13 @@ public class ToolIndex
     public ToolIndex(
         ServerRegistry registry,
         ConnectionManager connectionManager,
+        SkillStore skillStore,
         IOptions<AggregatorOptions> options,
         ILogger<ToolIndex> logger)
     {
         _registry = registry;
         _connectionManager = connectionManager;
+        _skillStore = skillStore;
         _options = options.Value;
         _logger = logger;
 
@@ -44,13 +47,27 @@ public class ToolIndex
         var servers = _registry.GetAll();
         var results = new List<ServiceIndex>();
 
+        // Advertise the aggregator itself if it has a skill document
+        if (_skillStore.Exists(_options.SelfName))
+        {
+            results.Add(new ServiceIndex
+            {
+                Name = _options.SelfName,
+                DisplayName = "MCP Aggregator",
+                Description = _options.SelfDescription,
+                Enabled = true,
+                Available = true,
+                HasSkillDocument = true
+            });
+        }
+
         foreach (var server in servers)
         {
             var index = new ServiceIndex
             {
                 Name = server.Name,
                 DisplayName = server.DisplayName,
-                Description = server.Description,
+                Description = server.AiSummary ?? server.Description,
                 Enabled = server.Enabled,
                 HasSkillDocument = server.HasSkillDocument
             };

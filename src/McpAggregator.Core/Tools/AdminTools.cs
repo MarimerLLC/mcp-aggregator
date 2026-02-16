@@ -13,6 +13,8 @@ public class AdminTools
     [Description("Register a new downstream MCP server with the aggregator.")]
     public static async Task<string> RegisterServer(
         ServerRegistry registry,
+        ConnectionManager connectionManager,
+        SummaryGenerator summaryGenerator,
         [Description("Unique name for the server")] string name,
         [Description("Transport type: 'Stdio' or 'Http'")] string transportType,
         [Description("For Stdio: the command to run. For Http: the server URL.")] string endpoint,
@@ -53,8 +55,41 @@ public class AdminTools
             Transport = transport
         };
 
+        await registry.EnsureLoadedAsync(ct);
         await registry.RegisterAsync(server, ct);
-        return $"Server '{name}' registered successfully.";
+
+        // Generate AI summary if available
+        var summary = await GenerateSummaryForServerAsync(
+            server, registry, connectionManager, summaryGenerator, ct);
+
+        var result = $"Server '{name}' registered successfully.";
+        if (summary is not null)
+            result += $" AI summary: {summary}";
+
+        return result;
+    }
+
+    [McpServerTool(Name = "regenerate_summary")]
+    [Description("Re-generate the AI summary for an existing registered server.")]
+    public static async Task<string> RegenerateSummary(
+        ServerRegistry registry,
+        ConnectionManager connectionManager,
+        SummaryGenerator summaryGenerator,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        var server = registry.Get(serverName);
+
+        if (!summaryGenerator.IsAvailable)
+            return "AI summary generation is not configured. Set McpAggregator:AI:Enabled to true and provide an endpoint.";
+
+        var summary = await GenerateSummaryForServerAsync(
+            server, registry, connectionManager, summaryGenerator, ct);
+
+        return summary is not null
+            ? $"Summary updated for '{serverName}': {summary}"
+            : $"Failed to generate summary for '{serverName}'.";
     }
 
     [McpServerTool(Name = "unregister_server")]
@@ -66,6 +101,7 @@ public class AdminTools
         [Description("The name of the server to remove")] string name,
         CancellationToken ct)
     {
+        await registry.EnsureLoadedAsync(ct);
         await connectionManager.DisconnectAsync(name);
         skillStore.Delete(name);
         await registry.UnregisterAsync(name, ct);
@@ -81,9 +117,47 @@ public class AdminTools
         [Description("Markdown content for the skill document")] string markdown,
         CancellationToken ct)
     {
+        await registry.EnsureLoadedAsync(ct);
         registry.Get(serverName); // Validate server exists
         await skillStore.SetAsync(serverName, markdown, ct);
         await registry.UpdateSkillFlagAsync(serverName, true, ct);
         return $"Skill document updated for '{serverName}'.";
+    }
+
+    private static async Task<string?> GenerateSummaryForServerAsync(
+        RegisteredServer server,
+        ServerRegistry registry,
+        ConnectionManager connectionManager,
+        SummaryGenerator summaryGenerator,
+        CancellationToken ct)
+    {
+        if (!summaryGenerator.IsAvailable)
+            return null;
+
+        try
+        {
+            var client = await connectionManager.GetClientAsync(server.Name, ct);
+            var mcpTools = await client.ListToolsAsync(cancellationToken: ct);
+
+            var toolSummaries = mcpTools.Select(t => new ToolSummary
+            {
+                Name = t.Name,
+                Description = t.Description
+            }).ToList();
+
+            var summary = await summaryGenerator.GenerateSummaryAsync(server, toolSummaries, ct);
+
+            if (summary is not null)
+            {
+                await registry.UpdateSummaryAsync(server.Name, summary, ct);
+            }
+
+            return summary;
+        }
+        catch
+        {
+            // Summary generation is best-effort; don't fail registration
+            return null;
+        }
     }
 }

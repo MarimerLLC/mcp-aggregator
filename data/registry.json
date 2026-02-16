@@ -1,4 +1,21 @@
 {
   "version": "1.0",
-  "servers": []
+  "servers": [
+    {
+      "name": "microsoft-learn",
+      "displayName": "Microsoft Learn Docs",
+      "description": "Official Microsoft Learn MCP Server - search and fetch Microsoft documentation and code samples. No auth required.",
+      "transport": {
+        "type": "Http",
+        "command": null,
+        "arguments": null,
+        "environment": null,
+        "url": "https://learn.microsoft.com/api/mcp"
+      },
+      "enabled": true,
+      "registeredAt": "2026-02-16T02:37:08.7596056+00:00",
+      "hasSkillDocument": false,
+      "aiSummary": "Search and fetch Microsoft/Azure official documentation articles and code samples. Use for reliable, up-to-date technical content and practical implementation examples."
+    }
+  ]
 }
