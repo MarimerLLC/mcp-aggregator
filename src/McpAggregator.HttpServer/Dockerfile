@@ -6,6 +6,7 @@ RUN dotnet publish src/McpAggregator.HttpServer/McpAggregator.HttpServer.csproj 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app .
+RUN mkdir -p /app/logs
 VOLUME /data
 ENV MCPAGGREGATOR__DATADIRECTORY=/data
 EXPOSE 8080
