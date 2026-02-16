@@ -88,9 +88,9 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
             });
         }
 
-        // MCP server with HTTP transport
+        // MCP server with stateless HTTP transport (no SSE sessions)
         builder.Services.AddMcpServer()
-            .WithHttpTransport()
+            .WithHttpTransport(options => options.Stateless = true)
             .WithToolsFromAssembly(typeof(ConsumerTools).Assembly);
 
         // REST API + OpenAPI
