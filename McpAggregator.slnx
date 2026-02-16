@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/McpAggregator.Core/McpAggregator.Core.csproj" />
+    <Project Path="src/McpAggregator.HttpServer/McpAggregator.HttpServer.csproj" />
+    <Project Path="src/McpAggregator.StdioServer/McpAggregator.StdioServer.csproj" />
+  </Folder>
+</Solution>
