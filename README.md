@@ -116,6 +116,12 @@ curl -X POST http://localhost:8080/api/admin/services \
 4. It calls `invoke_tool` to proxy a tool call to the downstream server. The aggregator lazily connects to the downstream server on first use.
 5. Idle downstream connections are automatically closed after a configurable timeout.
 
+### Self-Describing Skill
+
+The aggregator automatically advertises itself in the `list_services` index when a skill document exists at `data/skills/{SelfName}.md` (default: `data/skills/mcp-aggregator.md`). This skill document is shipped with the project and teaches consuming LLMs the discover-drill down-invoke workflow without any manual setup.
+
+The aggregator's `SelfName` setting controls both the name shown in the index and which skill file is loaded. If you need to change it, update the `SelfName` in configuration and rename the skill file to match.
+
 ## MCP Tools
 
 | Tool | Description |
@@ -176,6 +182,8 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `IndexCacheTtl` | 5 minutes | How long to cache the service index |
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
+| `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
+| `SelfDescription` | *(built-in)* | Description shown for the aggregator in the service index |
 
 All settings can be overridden with environment variables using the `MCPAGGREGATOR__` prefix (e.g., `MCPAGGREGATOR__CONNECTIONIDLETIMEOUT=01:00:00`).
 
