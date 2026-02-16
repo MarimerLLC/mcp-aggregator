@@ -14,6 +14,7 @@ This server acts as a unified gateway to multiple downstream MCP servers. Instea
 2. **Drill down** — call `get_service_details` with a `serverName` to get full tool schemas (parameter names, types, descriptions).
 3. **Read the skill** — call `get_service_skill` with a `serverName` to get usage guidance for that server's tools (if a skill document is available).
 4. **Invoke** — call `invoke_tool` with `serverName`, `toolName`, and `arguments` to execute a tool on the downstream server.
+5. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
 ## Tool Reference
 
@@ -71,7 +72,16 @@ An AI-generated summary is created automatically at registration time based on t
 
 ### Updating Skills
 
-Use `update_skill` to attach a markdown guide to any registered server. Skill documents help LLM sessions use a server's tools more effectively and are retrieved via `get_service_skill`.
+Skill docs are **living documents** — they should be updated as you learn better patterns for using a server's tools. This is not just an admin task; it's an expected part of the usage lifecycle.
+
+Use `update_skill(serverName, markdown)` to set or improve any server's skill document. You should update a skill doc when you:
+
+- Discover required parameter patterns or defaults that aren't documented
+- Find gotchas, error conditions, or workarounds worth noting
+- Develop a better workflow or sequence of tool calls
+- Notice the existing skill doc is missing, incomplete, or wrong
+
+Each update replaces the full document, so fetch the current content with `get_service_skill` first, then merge your improvements. The goal is that the next session using this server benefits from what you learned.
 
 ### Regenerating Summaries
 
