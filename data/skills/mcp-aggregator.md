@@ -20,9 +20,11 @@ You are connected to an MCP aggregator gateway. It proxies your tool calls to mu
 | `register_server` | Register a new downstream server (admin) |
 | `unregister_server` | Remove a registered server (admin) |
 | `update_skill` | Set or update a server's skill document (admin) |
+| `regenerate_summary` | Re-generate the AI summary for a server (admin) |
 
 ## Tips
 
+- The `list_services` descriptions may be AI-generated summaries that are more concise and differentiated than the raw server descriptions. These are created automatically when a server is registered.
 - Always start with `list_services` to understand what is available before invoking tools.
 - Use `get_service_skill` before using a server for the first time — skill documents contain important context about how to use the tools correctly.
 - The `arguments` parameter of `invoke_tool` is a JSON string, not a JSON object. Serialize the arguments object to a string before passing it.
@@ -39,3 +41,5 @@ Use `register_server` to add new downstream servers at runtime. You need:
 - `environment` (Stdio only) — JSON object of environment variables
 
 Use `update_skill` to attach a markdown guide to any registered server, helping future LLM sessions use its tools more effectively.
+
+Use `regenerate_summary` to refresh a server's AI-generated summary. This is rarely needed — summaries are generated automatically at registration time. Use it if a server's tools have changed significantly since it was registered, or if the original summary generation failed.

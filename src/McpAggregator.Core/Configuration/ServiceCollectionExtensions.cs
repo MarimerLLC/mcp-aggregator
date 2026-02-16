@@ -11,6 +11,7 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddAggregatorCore(this IServiceCollection services, IConfiguration configuration)
     {
         services.Configure<AggregatorOptions>(configuration.GetSection(AggregatorOptions.SectionName));
+        services.Configure<AiOptions>(configuration.GetSection(AiOptions.SectionName));
 
         services.AddSingleton<IRegistryPersistence, JsonFilePersistence>();
         services.AddSingleton<ServerRegistry>();
@@ -18,6 +19,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ToolIndex>();
         services.AddSingleton<SkillStore>();
         services.AddSingleton<ToolProxyHandler>();
+        services.AddSingleton<SummaryGenerator>();
 
         services.AddHostedService<IdleConnectionCleanupService>();
 

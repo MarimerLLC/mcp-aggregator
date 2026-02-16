@@ -9,4 +9,5 @@ public class RegisteredServer
     public bool Enabled { get; set; } = true;
     public DateTimeOffset RegisteredAt { get; set; } = DateTimeOffset.UtcNow;
     public bool HasSkillDocument { get; set; }
+    public string? AiSummary { get; set; }
 }

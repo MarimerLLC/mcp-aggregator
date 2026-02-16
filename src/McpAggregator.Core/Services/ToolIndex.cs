@@ -50,7 +50,7 @@ public class ToolIndex
             {
                 Name = server.Name,
                 DisplayName = server.DisplayName,
-                Description = server.Description,
+                Description = server.AiSummary ?? server.Description,
                 Enabled = server.Enabled,
                 HasSkillDocument = server.HasSkillDocument
             };

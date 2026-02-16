@@ -98,6 +98,13 @@ public class ServerRegistry
         await PersistAsync(ct);
     }
 
+    public async Task UpdateSummaryAsync(string name, string summary, CancellationToken ct = default)
+    {
+        var server = Get(name);
+        server.AiSummary = summary;
+        await PersistAsync(ct);
+    }
+
     private async Task PersistAsync(CancellationToken ct)
     {
         var data = new RegistryData { Servers = _servers.Values.ToList() };
