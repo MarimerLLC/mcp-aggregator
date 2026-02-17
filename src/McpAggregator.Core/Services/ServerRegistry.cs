@@ -105,6 +105,14 @@ public class ServerRegistry
         await PersistAsync(ct);
     }
 
+    public async Task SetEnabledAsync(string name, bool enabled, CancellationToken ct = default)
+    {
+        var server = Get(name);
+        server.Enabled = enabled;
+        await PersistAsync(ct);
+        _logger.LogInformation("Server '{Name}' {Status}", name, enabled ? "enabled" : "disabled");
+    }
+
     private async Task PersistAsync(CancellationToken ct)
     {
         var data = new RegistryData { Servers = _servers.Values.ToList() };

@@ -124,6 +124,23 @@ public class AdminController : ControllerBase
         await _registry.UpdateSkillFlagAsync(name, true, ct);
         return Ok(new { message = $"Skill document updated for '{name}'." });
     }
+
+    [HttpPost("{name}/enable")]
+    public async Task<IActionResult> EnableServer(string name, CancellationToken ct)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        await _registry.SetEnabledAsync(name, true, ct);
+        return Ok(new { message = $"Server '{name}' enabled." });
+    }
+
+    [HttpPost("{name}/disable")]
+    public async Task<IActionResult> DisableServer(string name, CancellationToken ct)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        await _registry.SetEnabledAsync(name, false, ct);
+        await _connectionManager.DisconnectAsync(name);
+        return Ok(new { message = $"Server '{name}' disabled and disconnected." });
+    }
 }
 
 public record RegisterServerRequest(
