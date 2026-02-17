@@ -30,8 +30,6 @@ public class ToolProxyHandler
         string? argumentsJson,
         CancellationToken ct = default)
     {
-        var client = await _connectionManager.GetClientAsync(serverName, ct);
-
         IReadOnlyDictionary<string, object?>? args = null;
         if (!string.IsNullOrWhiteSpace(argumentsJson))
         {
@@ -45,7 +43,8 @@ public class ToolProxyHandler
 
         try
         {
-            var result = await client.CallToolAsync(toolName, args, cancellationToken: cts.Token);
+            var result = await _connectionManager.ExecuteWithRetryAsync<CallToolResult>(serverName,
+                async (client, token) => await client.CallToolAsync(toolName, args, cancellationToken: token), cts.Token);
 
             var textContent = result.Content
                 .OfType<TextContentBlock>()

@@ -4,6 +4,7 @@ using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol.Client;
 
 namespace McpAggregator.Core.Services;
 
@@ -123,8 +124,8 @@ public class ToolIndex
             return cached.Tools;
         }
 
-        var client = await _connectionManager.GetClientAsync(serverName, ct);
-        var mcpTools = await client.ListToolsAsync(cancellationToken: ct);
+        var mcpTools = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientTool>>(serverName,
+            async (client, token) => await client.ListToolsAsync(cancellationToken: token), ct);
 
         var tools = mcpTools.Select(t => new ToolDetail
         {
