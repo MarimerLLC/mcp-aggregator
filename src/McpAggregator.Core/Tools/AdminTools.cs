@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using McpAggregator.Core.Models;
 using McpAggregator.Core.Services;
+using ModelContextProtocol.Client;
 using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Tools;
@@ -136,8 +137,8 @@ public class AdminTools
 
         try
         {
-            var client = await connectionManager.GetClientAsync(server.Name, ct);
-            var mcpTools = await client.ListToolsAsync(cancellationToken: ct);
+            var mcpTools = await connectionManager.ExecuteWithRetryAsync<IList<McpClientTool>>(server.Name,
+                async (client, token) => await client.ListToolsAsync(cancellationToken: token), ct);
 
             var toolSummaries = mcpTools.Select(t => new ToolSummary
             {

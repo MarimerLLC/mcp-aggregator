@@ -1,6 +1,7 @@
 using McpAggregator.Core.Models;
 using McpAggregator.Core.Services;
 using Microsoft.AspNetCore.Mvc;
+using ModelContextProtocol.Client;
 
 namespace McpAggregator.HttpServer.Controllers;
 
@@ -44,8 +45,8 @@ public class AdminController : ControllerBase
         {
             try
             {
-                var client = await _connectionManager.GetClientAsync(server.Name, ct);
-                var mcpTools = await client.ListToolsAsync(cancellationToken: ct);
+                var mcpTools = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientTool>>(server.Name,
+                    async (client, token) => await client.ListToolsAsync(cancellationToken: token), ct);
 
                 var toolSummaries = mcpTools.Select(t => new ToolSummary
                 {
@@ -80,8 +81,8 @@ public class AdminController : ControllerBase
 
         try
         {
-            var client = await _connectionManager.GetClientAsync(server.Name, ct);
-            var mcpTools = await client.ListToolsAsync(cancellationToken: ct);
+            var mcpTools = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientTool>>(server.Name,
+                async (client, token) => await client.ListToolsAsync(cancellationToken: token), ct);
 
             var toolSummaries = mcpTools.Select(t => new ToolSummary
             {

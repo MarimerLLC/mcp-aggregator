@@ -96,6 +96,40 @@ public sealed class ConnectionManager : IAsyncDisposable
         }
     }
 
+    public async Task<T> ExecuteWithRetryAsync<T>(
+        string serverName,
+        Func<McpClient, CancellationToken, Task<T>> operation,
+        CancellationToken ct = default)
+    {
+        var client = await GetClientAsync(serverName, ct);
+        try
+        {
+            return await operation(client, ct);
+        }
+        catch (Exception ex) when (ShouldRetry(ex))
+        {
+            _logger.LogWarning(ex, "Connection to '{Server}' appears broken, reconnecting", serverName);
+            await DisconnectAsync(serverName);
+            client = await GetClientAsync(serverName, ct);
+            return await operation(client, ct);
+        }
+    }
+
+    private static bool ShouldRetry(Exception ex)
+    {
+        if (ex is OperationCanceledException or AggregatorException)
+            return false;
+
+        return ex is System.IO.IOException
+            or System.Net.Http.HttpRequestException
+            or System.Net.Sockets.SocketException
+            or ObjectDisposedException
+            || ex.InnerException is System.IO.IOException
+            or System.Net.Http.HttpRequestException
+            or System.Net.Sockets.SocketException
+            or ObjectDisposedException;
+    }
+
     public async Task CleanupIdleConnectionsAsync(CancellationToken ct = default)
     {
         var cutoff = DateTimeOffset.UtcNow - _options.ConnectionIdleTimeout;
