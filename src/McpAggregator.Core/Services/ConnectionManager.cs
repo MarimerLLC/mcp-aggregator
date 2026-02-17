@@ -113,6 +113,12 @@ public sealed class ConnectionManager : IAsyncDisposable
             client = await GetClientAsync(serverName, ct);
             return await operation(client, ct);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException and not AggregatorException)
+        {
+            _logger.LogError(ex, "Non-retryable error executing operation on '{Server}': {ExType}: {ExMessage}",
+                serverName, ex.GetType().FullName, ex.Message);
+            throw;
+        }
     }
 
     private static bool ShouldRetry(Exception ex)
