@@ -27,6 +27,7 @@ spec:
         - name: mcp-aggregator
           image: rockylhotka/mcp-aggregator:latest
           imagePullPolicy: Always
+          args: ["--log-dir", "/data/logs"]
           ports:
             - name: http
               containerPort: 8080

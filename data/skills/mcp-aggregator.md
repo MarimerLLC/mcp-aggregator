@@ -26,6 +26,8 @@ The same workflow applies via the REST API. Start with `GET /api` to get aggrega
 | `get_service_details` | `GET /api/services/{name}` | Full parameter schemas for a server's tools |
 | `get_service_skill` | `GET /api/services/{name}/skill` | Skill/usage guide for a server |
 | `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Proxy a tool call to a downstream server |
+| `enable_service` | `POST /api/admin/services/{name}/enable` | Enable a disabled server, allowing tool invocations |
+| `disable_service` | `POST /api/admin/services/{name}/disable` | Disable a server, preventing tool invocations |
 | `register_server` | `POST /api/admin/services` | Register a new downstream server |
 | `unregister_server` | `DELETE /api/admin/services/{name}` | Remove a registered server |
 | `update_skill` | `PUT /api/admin/services/{name}/skill` | Set or update a server's skill document |
@@ -59,7 +61,7 @@ Content-Type: application/json
 
 ## Error Handling
 
-- **Server unavailable:** If `list_services` shows a server with `available: false`, it means the downstream connection could not be established. Do not attempt `invoke_tool` calls against it — they will fail.
+- **Server unavailable:** If a server is disabled (via `disable_service`) or cannot be reached, `invoke_tool` calls will fail with "Server '{name}' is unavailable." Check `list_services` to see the server's enabled status.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
 - **Slow first call:** Connections to downstream servers are lazy. The first `invoke_tool` call to a server may take longer as the connection is established. Subsequent calls will be faster.
 ## Tips
@@ -68,6 +70,36 @@ Content-Type: application/json
 - Always check `get_service_skill` before using a server for the first time — skill documents contain important context about correct tool usage, required parameters, and best practices.
 
 ## Admin Operations
+
+### Enabling and Disabling Servers
+
+Servers can be temporarily disabled without unregistering them. This is useful when a downstream server is misbehaving, unreachable, or being maintained.
+
+**Disabling a server:**
+- Use `disable_service(serverName)` to disable a registered server
+- The server's connection is immediately closed
+- All subsequent `invoke_tool` calls to this server will fail with "Server is unavailable"
+- The server remains registered and all its configuration, skill docs, and metadata are preserved
+- The disabled state persists across aggregator restarts
+
+**Enabling a server:**
+- Use `enable_service(serverName)` to re-enable a disabled server
+- The server will be available for tool invocations again
+- A new connection will be established on the next `invoke_tool` call
+
+**When to use:**
+- Temporarily disable a server that is returning errors or timing out
+- Disable servers during maintenance windows
+- Quickly recover from problematic downstream servers without losing their configuration
+
+**Example:**
+```
+# Disable a problematic server
+disable_service(serverName: "calendar-mcp")
+
+# Later, re-enable it
+enable_service(serverName: "calendar-mcp")
+```
 
 ### Registering a Server
 

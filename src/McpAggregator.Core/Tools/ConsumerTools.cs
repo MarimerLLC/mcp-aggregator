@@ -54,6 +54,30 @@ public class ConsumerTools
         return await proxy.InvokeAsync(serverName, toolName, arguments, ct);
     }
 
+    [McpServerTool(Name = "enable_service")]
+    [Description("Enable a registered MCP server, allowing its tools to be invoked.")]
+    public static async Task<string> EnableService(
+        ServerRegistry registry,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        await registry.SetEnabledAsync(serverName, true, ct);
+        return $"Server '{serverName}' enabled.";
+    }
+
+    [McpServerTool(Name = "disable_service")]
+    [Description("Disable a registered MCP server, preventing its tools from being invoked.")]
+    public static async Task<string> DisableService(
+        ServerRegistry registry,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        await registry.SetEnabledAsync(serverName, false, ct);
+        return $"Server '{serverName}' disabled.";
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,

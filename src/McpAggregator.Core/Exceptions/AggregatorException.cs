@@ -15,5 +15,8 @@ public class ServerUnavailableException(string serverName, Exception? inner = nu
 public class ToolNotFoundException(string serverName, string toolName)
     : AggregatorException($"Tool '{toolName}' not found on server '{serverName}'.");
 
+public class ToolExecutionException(string serverName, string toolName, string errorMessage)
+    : AggregatorException($"Tool '{toolName}' on server '{serverName}' returned error: {errorMessage}");
+
 public class InvalidTransportConfigException(string message)
     : AggregatorException(message);
