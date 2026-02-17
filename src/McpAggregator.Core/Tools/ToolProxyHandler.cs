@@ -53,14 +53,21 @@ public class ToolProxyHandler
                 .ToList();
 
             if (textContent.Count == 0)
-                return (result.IsError ?? false) ? "Tool returned an error with no text content." : "Tool completed with no text content.";
+            {
+                if (result.IsError ?? false)
+                {
+                    _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error with no text content", toolName, serverName);
+                    throw new ToolExecutionException(serverName, toolName, "No error details provided");
+                }
+                return "Tool completed with no text content.";
+            }
 
             var response = string.Join("\n", textContent);
 
             if (result.IsError ?? false)
             {
                 _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error: {Error}", toolName, serverName, response);
-                return $"[Error] {response}";
+                throw new ToolExecutionException(serverName, toolName, response);
             }
 
             return response;
