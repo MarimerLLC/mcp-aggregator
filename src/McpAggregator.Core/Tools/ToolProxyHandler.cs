@@ -24,6 +24,24 @@ public class ToolProxyHandler
         _logger = logger;
     }
 
+    private void LogCallToolResult(string toolName, string serverName, CallToolResult result)
+    {
+        var contentSummary = string.Join(", ", result.Content
+            .GroupBy(b => b.Type ?? "unknown")
+            .Select(g => $"{g.Key}:{g.Count()}"));
+
+        _logger.LogDebug(
+            "Tool '{Tool}' on '{Server}' returned IsError={IsError}, content=[{Content}]",
+            toolName, serverName, result.IsError, contentSummary);
+
+        if (result.IsError is null)
+        {
+            _logger.LogDebug(
+                "Tool '{Tool}' on '{Server}' has IsError=null (downstream did not set error flag explicitly)",
+                toolName, serverName);
+        }
+    }
+
     public async Task<string> InvokeAsync(
         string serverName,
         string toolName,
@@ -46,22 +64,33 @@ public class ToolProxyHandler
             var result = await _connectionManager.ExecuteWithRetryAsync<CallToolResult>(serverName,
                 async (client, token) => await client.CallToolAsync(toolName, args, cancellationToken: token), cts.Token);
 
-            var textContent = result.Content
-                .OfType<TextContentBlock>()
-                .Select(c => c.Text)
-                .ToList();
+            LogCallToolResult(toolName, serverName, result);
 
-            if (textContent.Count == 0)
+            var parts = new List<string>();
+
+            foreach (var block in result.Content)
+            {
+                if (block is TextContentBlock text)
+                {
+                    parts.Add(text.Text);
+                }
+                else
+                {
+                    parts.Add($"[{block.Type ?? "unknown"} content block]");
+                }
+            }
+
+            if (parts.Count == 0)
             {
                 if (result.IsError ?? false)
                 {
-                    _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error with no text content", toolName, serverName);
+                    _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error with no content blocks", toolName, serverName);
                     throw new ToolExecutionException(serverName, toolName, "No error details provided");
                 }
-                return "Tool completed with no text content.";
+                return "Tool completed with no content.";
             }
 
-            var response = string.Join("\n", textContent);
+            var response = string.Join("\n", parts);
 
             if (result.IsError ?? false)
             {
