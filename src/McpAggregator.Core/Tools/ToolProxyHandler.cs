@@ -42,6 +42,24 @@ public class ToolProxyHandler
         }
     }
 
+    private static object? ConvertJsonElement(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.TryGetInt64(out var l) ? (object)l : element.GetDouble(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Null => null,
+            JsonValueKind.Array => element.EnumerateArray()
+                .Select(ConvertJsonElement)
+                .ToList(),
+            JsonValueKind.Object => element.EnumerateObject()
+                .ToDictionary(p => p.Name, p => ConvertJsonElement(p.Value)),
+            _ => element.GetRawText(),
+        };
+    }
+
     public async Task<string> InvokeAsync(
         string serverName,
         string toolName,
@@ -51,7 +69,11 @@ public class ToolProxyHandler
         IReadOnlyDictionary<string, object?>? args = null;
         if (!string.IsNullOrWhiteSpace(argumentsJson))
         {
-            args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argumentsJson);
+            var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(argumentsJson);
+            if (raw is not null)
+            {
+                args = raw.ToDictionary(kvp => kvp.Key, kvp => ConvertJsonElement(kvp.Value));
+            }
         }
 
         _logger.LogInformation("Invoking tool '{Tool}' on '{Server}'", toolName, serverName);
