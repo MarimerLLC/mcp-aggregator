@@ -6,6 +6,7 @@ using McpAggregator.HttpServer.Middleware;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
 using Serilog;
@@ -69,8 +70,19 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
 
         // OpenTelemetry tracing & metrics
         builder.Services.AddOpenTelemetry()
-            .WithTracing(t => t.AddAspNetCoreInstrumentation())
-            .WithMetrics(m => m.AddAspNetCoreInstrumentation());
+            .ConfigureResource(r => r.AddService("mcp-aggregator"))
+            .WithTracing(t =>
+            {
+                t.AddAspNetCoreInstrumentation();
+                if (!string.IsNullOrEmpty(otlpEndpoint))
+                    t.AddOtlpExporter(o => o.Endpoint = new Uri(otlpEndpoint));
+            })
+            .WithMetrics(m =>
+            {
+                m.AddAspNetCoreInstrumentation();
+                if (!string.IsNullOrEmpty(otlpEndpoint))
+                    m.AddOtlpExporter(o => o.Endpoint = new Uri(otlpEndpoint));
+            });
 
         // Core services
         builder.Services.AddAggregatorCore(builder.Configuration);

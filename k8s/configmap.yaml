@@ -10,3 +10,4 @@ data:
   ASPNETCORE_ENVIRONMENT: Production
   ASPNETCORE_URLS: http://+:8080
   MCPAGGREGATOR__DATADIRECTORY: /data
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy.loki.svc.cluster.local:4317
