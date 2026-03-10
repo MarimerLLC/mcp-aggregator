@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Azure.AI.Inference;
+using McpAggregator.Core;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Tools;
 using McpAggregator.HttpServer.Middleware;
@@ -74,12 +75,14 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
             .WithTracing(t =>
             {
                 t.AddAspNetCoreInstrumentation();
+                t.AddSource(AggregatorTelemetry.ServiceName);
                 if (!string.IsNullOrEmpty(otlpEndpoint))
                     t.AddOtlpExporter(o => o.Endpoint = new Uri(otlpEndpoint));
             })
             .WithMetrics(m =>
             {
                 m.AddAspNetCoreInstrumentation();
+                m.AddMeter(AggregatorTelemetry.ServiceName);
                 if (!string.IsNullOrEmpty(otlpEndpoint))
                     m.AddOtlpExporter(o => o.Endpoint = new Uri(otlpEndpoint));
             });

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
@@ -81,6 +82,14 @@ public class ToolProxyHandler
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(_options.DefaultToolTimeout);
 
+        using var activity = AggregatorTelemetry.ActivitySource.StartActivity("mcp.tool_invoke");
+        activity?.SetTag("server_name", serverName);
+        activity?.SetTag("tool_name", toolName);
+
+        var sw = Stopwatch.StartNew();
+        // Pessimistic default; success path overwrites before returning.
+        string resultLabel = "error";
+
         try
         {
             var result = await _connectionManager.ExecuteWithRetryAsync<CallToolResult>(serverName,
@@ -109,6 +118,7 @@ public class ToolProxyHandler
                     _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error with no content blocks", toolName, serverName);
                     throw new ToolExecutionException(serverName, toolName, "No error details provided");
                 }
+                resultLabel = "success";
                 return "Tool completed with no content.";
             }
 
@@ -120,11 +130,37 @@ public class ToolProxyHandler
                 throw new ToolExecutionException(serverName, toolName, response);
             }
 
+            resultLabel = "success";
             return response;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            resultLabel = "cancelled";
+            throw;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
+            resultLabel = "timeout";
             throw new AggregatorException($"Tool '{toolName}' on '{serverName}' timed out after {_options.DefaultToolTimeout.TotalSeconds}s.");
+        }
+        finally
+        {
+            sw.Stop();
+
+            if (resultLabel == "success")
+                activity?.SetStatus(ActivityStatusCode.Ok);
+            else if (resultLabel is "error" or "timeout")
+                activity?.SetStatus(ActivityStatusCode.Error, resultLabel);
+
+            var tags = new TagList
+            {
+                { "server_name", serverName },
+                { "tool_name", toolName },
+                { "result", resultLabel }
+            };
+            AggregatorTelemetry.ToolInvocations.Add(1, tags);
+            AggregatorTelemetry.ToolInvocationDuration.Record(sw.Elapsed.TotalSeconds,
+                new TagList { { "server_name", serverName }, { "tool_name", toolName } });
         }
     }
 }

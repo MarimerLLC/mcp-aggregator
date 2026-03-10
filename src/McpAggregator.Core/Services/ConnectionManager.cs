@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
@@ -92,6 +93,7 @@ public sealed class ConnectionManager : IAsyncDisposable
         if (_connections.TryRemove(serverName, out var state))
         {
             _logger.LogInformation("Disconnecting from '{Server}'", serverName);
+            AggregatorTelemetry.ActiveConnections.Add(-1, new TagList { { "server_name", serverName } });
             await state.DisposeAsync();
         }
     }
@@ -109,6 +111,7 @@ public sealed class ConnectionManager : IAsyncDisposable
         catch (Exception ex) when (ShouldRetry(ex))
         {
             _logger.LogWarning(ex, "Connection to '{Server}' appears broken, reconnecting", serverName);
+            AggregatorTelemetry.ConnectionRetries.Add(1, new TagList { { "server_name", serverName } });
             await DisconnectAsync(serverName);
             client = await GetClientAsync(serverName, ct);
             return await operation(client, ct);
@@ -151,6 +154,7 @@ public sealed class ConnectionManager : IAsyncDisposable
     private async Task<ConnectionState> ConnectAsync(RegisteredServer server, CancellationToken ct)
     {
         _logger.LogInformation("Connecting to '{Server}' via {Transport}", server.Name, server.Transport.Type);
+        AggregatorTelemetry.ConnectionAttempts.Add(1, new TagList { { "server_name", server.Name } });
 
         IClientTransport transport;
         McpClient client;
@@ -198,6 +202,7 @@ public sealed class ConnectionManager : IAsyncDisposable
         };
 
         _connections[server.Name] = state;
+        AggregatorTelemetry.ActiveConnections.Add(1, new TagList { { "server_name", server.Name } });
         _logger.LogInformation("Connected to '{Server}'", server.Name);
         return state;
     }
