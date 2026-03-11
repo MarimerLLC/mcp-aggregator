@@ -61,7 +61,7 @@ public class ToolProxyHandler
         };
     }
 
-    public async Task<string> InvokeAsync(
+    public async Task<CallToolResult> InvokeAsync(
         string serverName,
         string toolName,
         string? argumentsJson,
@@ -97,41 +97,14 @@ public class ToolProxyHandler
 
             LogCallToolResult(toolName, serverName, result);
 
-            var parts = new List<string>();
-
-            foreach (var block in result.Content)
-            {
-                if (block is TextContentBlock text)
-                {
-                    parts.Add(text.Text);
-                }
-                else
-                {
-                    parts.Add($"[{block.Type ?? "unknown"} content block]");
-                }
-            }
-
-            if (parts.Count == 0)
-            {
-                if (result.IsError ?? false)
-                {
-                    _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error with no content blocks", toolName, serverName);
-                    throw new ToolExecutionException(serverName, toolName, "No error details provided");
-                }
-                resultLabel = "success";
-                return "Tool completed with no content.";
-            }
-
-            var response = string.Join("\n", parts);
-
             if (result.IsError ?? false)
             {
-                _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error: {Error}", toolName, serverName, response);
-                throw new ToolExecutionException(serverName, toolName, response);
+                var errorText = string.Join("\n", result.Content.OfType<TextContentBlock>().Select(b => b.Text));
+                _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error: {Error}", toolName, serverName, errorText);
             }
 
             resultLabel = "success";
-            return response;
+            return result;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

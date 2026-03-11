@@ -64,7 +64,7 @@ public class ServicesController : ControllerBase
         CancellationToken ct)
     {
         var result = await _proxy.InvokeAsync(name, tool, request?.Arguments, ct);
-        return Ok(new { result });
+        return Ok(result);
     }
 }
 

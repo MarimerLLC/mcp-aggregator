@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using McpAggregator.Core.Services;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Tools;
@@ -44,7 +45,7 @@ public class ConsumerTools
 
     [McpServerTool(Name = "invoke_tool")]
     [Description("Invoke a tool on a downstream MCP server by name. Returns the tool's response.")]
-    public static async Task<string> InvokeTool(
+    public static async Task<CallToolResult> InvokeTool(
         ToolProxyHandler proxy,
         [Description("The name of the registered server")] string serverName,
         [Description("The name of the tool to invoke")] string toolName,
