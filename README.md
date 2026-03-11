@@ -112,8 +112,8 @@ curl -X POST http://localhost:8080/api/admin/services \
 
 1. An AI tool connects to the aggregator via MCP (stdio or HTTP/SSE).
 2. It calls `list_services` to get a concise index of all registered servers and their tools.
-3. It calls `get_service_details` to drill into a specific server's full tool schemas.
-4. It calls `invoke_tool` to proxy a tool call to the downstream server. The aggregator lazily connects to the downstream server on first use.
+3. It calls `get_service_details` to drill into a specific server's full tool schemas and prompt templates.
+4. It calls `invoke_tool` to proxy a tool call, or `get_prompt` to retrieve a rendered prompt template from the downstream server.
 5. Idle downstream connections are automatically closed after a configurable timeout.
 
 ### Self-Describing Skill
@@ -127,9 +127,10 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | Tool | Description |
 |------|-------------|
 | `list_services` | Concise index of all registered servers with tool names and descriptions |
-| `get_service_details` | Full tool schemas for a specific server |
+| `get_service_details` | Full tool schemas and prompt templates for a specific server |
 | `get_service_skill` | Retrieve a server's skill document (markdown guide) |
 | `invoke_tool` | Proxy a tool call to a downstream server |
+| `get_prompt` | Retrieve a rendered prompt template from a downstream server |
 | `register_server` | Register a new downstream MCP server |
 | `unregister_server` | Remove a registered server |
 | `update_skill` | Set or update a server's skill document |
@@ -192,6 +193,8 @@ All settings can be overridden with environment variables using the `MCPAGGREGAT
 ### AI-Generated Server Summaries
 
 When an LLM-compatible AI endpoint is configured, the aggregator generates concise server summaries at registration time. These summaries replace verbose or vague descriptions in the service index, helping consuming LLMs make better routing decisions.
+
+The summary is generated from the server's full capability set: its registered metadata, tool catalog, and any prompt templates it exposes. The prompt instructs the AI to frame the summary for consumption by another AI agent, so the output uses precise technical language suited for routing decisions rather than human marketing copy.
 
 Summaries are generated once at registration and persisted. If the AI endpoint is unavailable or unconfigured, registration proceeds normally without a summary. You can regenerate a summary at any time via the `regenerate_summary` MCP tool or the `POST /api/admin/services/{name}/regenerate-summary` REST endpoint.
 

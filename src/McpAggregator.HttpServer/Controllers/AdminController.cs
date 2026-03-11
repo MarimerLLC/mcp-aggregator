@@ -54,7 +54,30 @@ public class AdminController : ControllerBase
                     Description = t.Description
                 }).ToList();
 
-                var summary = await _summaryGenerator.GenerateSummaryAsync(server, toolSummaries, ct);
+                List<PromptDetail> promptDetails = [];
+                try
+                {
+                    var mcpPrompts = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientPrompt>>(server.Name,
+                        async (client, token) => await client.ListPromptsAsync(cancellationToken: token), ct);
+
+                    promptDetails = mcpPrompts.Select(p => new PromptDetail
+                    {
+                        Name = p.Name,
+                        Description = p.Description,
+                        Arguments = p.ProtocolPrompt.Arguments?.Select(a => new PromptArgumentDetail
+                        {
+                            Name = a.Name,
+                            Description = a.Description,
+                            Required = a.Required ?? false
+                        }).ToList() ?? []
+                    }).ToList();
+                }
+                catch
+                {
+                    // Prompt listing is best-effort; some servers may not support it
+                }
+
+                var summary = await _summaryGenerator.GenerateSummaryAsync(server, toolSummaries, promptDetails, ct);
 
                 if (summary is not null)
                 {
@@ -90,7 +113,30 @@ public class AdminController : ControllerBase
                 Description = t.Description
             }).ToList();
 
-            var summary = await _summaryGenerator.GenerateSummaryAsync(server, toolSummaries, ct);
+            List<PromptDetail> promptDetails = [];
+            try
+            {
+                var mcpPrompts = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientPrompt>>(server.Name,
+                    async (client, token) => await client.ListPromptsAsync(cancellationToken: token), ct);
+
+                promptDetails = mcpPrompts.Select(p => new PromptDetail
+                {
+                    Name = p.Name,
+                    Description = p.Description,
+                    Arguments = p.ProtocolPrompt.Arguments?.Select(a => new PromptArgumentDetail
+                    {
+                        Name = a.Name,
+                        Description = a.Description,
+                        Required = a.Required ?? false
+                    }).ToList() ?? []
+                }).ToList();
+            }
+            catch
+            {
+                // Prompt listing is best-effort; some servers may not support it
+            }
+
+            var summary = await _summaryGenerator.GenerateSummaryAsync(server, toolSummaries, promptDetails, ct);
 
             if (summary is not null)
             {

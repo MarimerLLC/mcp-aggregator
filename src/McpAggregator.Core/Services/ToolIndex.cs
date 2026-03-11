@@ -17,8 +17,10 @@ public class ToolIndex
     private readonly ILogger<ToolIndex> _logger;
 
     private readonly ConcurrentDictionary<string, CachedTools> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, CachedPrompts> _promptCache = new(StringComparer.OrdinalIgnoreCase);
 
     private record CachedTools(List<ToolDetail> Tools, DateTimeOffset FetchedAt);
+    private record CachedPrompts(List<PromptDetail> Prompts, DateTimeOffset FetchedAt);
 
     public ToolIndex(
         ServerRegistry registry,
@@ -39,6 +41,8 @@ public class ToolIndex
             var registered = _registry.GetAll().Select(s => s.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var stale = _cache.Keys.Where(k => !registered.Contains(k)).ToList();
             foreach (var key in stale) _cache.TryRemove(key, out _);
+            var stalePrompts = _promptCache.Keys.Where(k => !registered.Contains(k)).ToList();
+            foreach (var key in stalePrompts) _promptCache.TryRemove(key, out _);
         };
     }
 
@@ -104,6 +108,16 @@ public class ToolIndex
         var server = _registry.Get(serverName);
         var tools = await GetToolsForServerAsync(serverName, ct);
 
+        List<PromptDetail> prompts = [];
+        try
+        {
+            prompts = await GetPromptsForServerAsync(serverName, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Server '{Server}' does not expose prompts", serverName);
+        }
+
         return new ServiceDetails
         {
             Name = server.Name,
@@ -112,7 +126,8 @@ public class ToolIndex
             Enabled = server.Enabled,
             Available = true,
             HasSkillDocument = server.HasSkillDocument,
-            Tools = tools
+            Tools = tools,
+            Prompts = prompts
         };
     }
 
@@ -141,11 +156,45 @@ public class ToolIndex
         return tools;
     }
 
+    public async Task<List<PromptDetail>> GetPromptsForServerAsync(string serverName, CancellationToken ct = default)
+    {
+        if (_promptCache.TryGetValue(serverName, out var cached) &&
+            DateTimeOffset.UtcNow - cached.FetchedAt < _options.IndexCacheTtl)
+        {
+            return cached.Prompts;
+        }
+
+        var mcpPrompts = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientPrompt>>(serverName,
+            async (client, token) => await client.ListPromptsAsync(cancellationToken: token), ct);
+
+        var prompts = mcpPrompts.Select(p => new PromptDetail
+        {
+            Name = p.Name,
+            Description = p.Description,
+            Arguments = p.ProtocolPrompt.Arguments?.Select(a => new PromptArgumentDetail
+            {
+                Name = a.Name,
+                Description = a.Description,
+                Required = a.Required ?? false
+            }).ToList() ?? []
+        }).ToList();
+
+        _promptCache[serverName] = new CachedPrompts(prompts, DateTimeOffset.UtcNow);
+        _logger.LogDebug("Cached {Count} prompts for '{Server}'", prompts.Count, serverName);
+        return prompts;
+    }
+
     public void InvalidateCache(string? serverName = null)
     {
         if (serverName is not null)
+        {
             _cache.TryRemove(serverName, out _);
+            _promptCache.TryRemove(serverName, out _);
+        }
         else
+        {
             _cache.Clear();
+            _promptCache.Clear();
+        }
     }
 }

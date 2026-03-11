@@ -55,6 +55,42 @@ public class ConsumerTools
         return await proxy.InvokeAsync(serverName, toolName, arguments, ct);
     }
 
+    [McpServerTool(Name = "get_prompt")]
+    [Description("Retrieve a rendered prompt from a downstream MCP server. Returns the prompt description and messages ready for use in a conversation.")]
+    public static async Task<string> GetPrompt(
+        ConnectionManager connectionManager,
+        [Description("The name of the registered server")] string serverName,
+        [Description("The name of the prompt to retrieve")] string promptName,
+        [Description("JSON object of string argument values for the prompt template, or null if no arguments needed")] string? arguments,
+        CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, object?>? args = null;
+        if (!string.IsNullOrWhiteSpace(arguments))
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(arguments);
+            if (raw is not null)
+                args = raw.ToDictionary(kvp => kvp.Key, kvp => (object?)(kvp.Value.GetString() ?? kvp.Value.GetRawText()));
+        }
+
+        var result = await connectionManager.ExecuteWithRetryAsync<GetPromptResult>(serverName,
+            async (client, token) => await client.GetPromptAsync(promptName, args, cancellationToken: token), ct);
+
+        return JsonSerializer.Serialize(result, JsonOptions);
+    }
+
+    [McpServerTool(Name = "refresh_service")]
+    [Description("Drop the cached metadata and connection for a registered MCP server, forcing a fresh reconnect and metadata reload on the next use. Use this after a downstream server has been updated.")]
+    public static async Task<string> RefreshService(
+        ToolIndex toolIndex,
+        ConnectionManager connectionManager,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        toolIndex.InvalidateCache(serverName);
+        await connectionManager.DisconnectAsync(serverName);
+        return $"Cache and connection cleared for '{serverName}'. Metadata will be reloaded on next use.";
+    }
+
     [McpServerTool(Name = "enable_service")]
     [Description("Enable a registered MCP server, allowing its tools to be invoked.")]
     public static async Task<string> EnableService(
