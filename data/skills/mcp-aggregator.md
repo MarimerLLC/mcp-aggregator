@@ -11,9 +11,9 @@ This server acts as a unified gateway to multiple downstream MCP servers. Instea
 ## Workflow
 
 1. **Discover** — call `list_services` to see all registered downstream servers and a summary of their tools.
-2. **Drill down** — call `get_service_details` with a `serverName` to get full tool schemas (parameter names, types, descriptions).
+2. **Drill down** — call `get_service_details` with a `serverName` to get full tool schemas (parameter names, types, descriptions) and any prompt templates the server exposes.
 3. **Read the skill** — call `get_service_skill` with a `serverName` to get usage guidance for that server's tools (if a skill document is available).
-4. **Invoke** — call `invoke_tool` with `serverName`, `toolName`, and `arguments` to execute a tool on the downstream server.
+4. **Invoke** — call `invoke_tool` with `serverName`, `toolName`, and `arguments` to execute a tool, or call `get_prompt` with `serverName`, `promptName`, and optional `arguments` to retrieve a rendered prompt template.
 5. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
 The same workflow applies via the REST API. Start with `GET /api` to get aggregator info and links, then use the REST endpoints listed in the Tool Reference table below.
@@ -23,9 +23,10 @@ The same workflow applies via the REST API. Start with `GET /api` to get aggrega
 | MCP Tool | REST Endpoint | Purpose |
 |----------|--------------|---------|
 | `list_services` | `GET /api/services` | Index of all servers and their tools |
-| `get_service_details` | `GET /api/services/{name}` | Full parameter schemas for a server's tools |
+| `get_service_details` | `GET /api/services/{name}` | Full tool schemas and prompt templates for a server |
 | `get_service_skill` | `GET /api/services/{name}/skill` | Skill/usage guide for a server |
 | `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Proxy a tool call to a downstream server |
+| `get_prompt` | `GET /api/services/{name}/prompts/{prompt}` | Retrieve a rendered prompt template from a downstream server |
 | `enable_service` | `POST /api/admin/services/{name}/enable` | Enable a disabled server, allowing tool invocations |
 | `disable_service` | `POST /api/admin/services/{name}/disable` | Disable a server, preventing tool invocations |
 | `register_server` | `POST /api/admin/services` | Register a new downstream server |
@@ -48,6 +49,22 @@ invoke_tool(
 )
 ```
 
+## Using Prompt Templates
+
+Some downstream servers expose prompt templates — reusable message sequences that can be parameterized. `get_service_details` always returns both tools and prompts for a server, so you'll see them in the same call you use to inspect tool schemas.
+
+To render a prompt, call `get_prompt` with the server name, the prompt name, and any required arguments:
+
+```
+get_prompt(
+  serverName: "my-server",
+  promptName: "summarize_document",
+  arguments: {"document": "...content...", "style": "bullet-points"}
+)
+```
+
+The result contains a description and a list of messages (with role and content) ready to inject into a conversation. Required vs. optional arguments are indicated in the `arguments` list returned by `get_service_details`.
+
 ## Calling via REST API
 
 The same invocation is available as an HTTP request:
@@ -66,7 +83,7 @@ Content-Type: application/json
 - **Slow first call:** Connections to downstream servers are lazy. The first `invoke_tool` call to a server may take longer as the connection is established. Subsequent calls will be faster.
 ## Tips
 
-- The `list_services` descriptions are AI-generated summaries that are concise and differentiated. These summaries are what you see when discovering servers, so they are worth keeping accurate (see `regenerate_summary` below).
+- The `list_services` descriptions are AI-generated summaries written for AI consumers — they use precise technical language to help with routing decisions. Summaries are generated from the server's full capability set (tools and prompt templates) at registration time. If a server's capabilities change significantly, use `regenerate_summary` to refresh the summary.
 - Always check `get_service_skill` before using a server for the first time — skill documents contain important context about correct tool usage, required parameters, and best practices.
 
 ## Admin Operations
@@ -115,7 +132,7 @@ Use `register_server` to add new downstream servers at runtime:
 | `displayName` | No | Human-friendly name |
 | `description` | No | What the server does |
 
-An AI-generated summary is created automatically at registration time based on the server's tools. Summary generation requires the AI backend to be configured on the aggregator (`McpAggregator:AI:Enabled = true` with a valid endpoint and API key). If AI is not configured, registration still succeeds but no summary is generated.
+An AI-generated summary is created automatically at registration time from the server's tools and prompt templates. Summary generation requires the AI backend to be configured on the aggregator (`McpAggregator:AI:Enabled = true` with a valid endpoint and API key). If AI is not configured, registration still succeeds but no summary is generated.
 
 ### Updating Skills
 
