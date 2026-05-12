@@ -58,13 +58,29 @@ public class SummaryGenerator
                     """;
             }
 
+            var serverIdentity = string.IsNullOrWhiteSpace(server.RemoteTitle)
+                ? server.RemoteName
+                : $"{server.RemoteTitle} ({server.RemoteName})";
+
+            var instructionsSection = string.IsNullOrWhiteSpace(server.RemoteInstructions)
+                ? ""
+                : $"""
+
+
+                    Server-supplied instructions (authoritative — these come from the server itself
+                    and describe how it expects to be used; weight this heavily over names alone):
+                    {server.RemoteInstructions}
+                    """;
+
             var userContent = $"""
                 Server name: {server.Name}
                 Display name: {server.DisplayName ?? "(none)"}
-                Description: {server.Description ?? "(none)"}
+                Registered description: {server.Description ?? "(none)"}
+                Remote identity: {serverIdentity ?? "(none)"}
+                Remote version: {server.RemoteVersion ?? "(none)"}
 
                 Tools:
-                {toolList}{promptSection}
+                {toolList}{promptSection}{instructionsSection}
                 """;
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -74,12 +90,18 @@ public class SummaryGenerator
                 [
                     new(ChatRole.System, """
                         You are a technical indexer building a capability index for an AI agent orchestrator.
-                        Given an MCP server's metadata, tool catalog, and prompt templates, produce a concise
-                        summary (2-4 sentences, max 300 characters) that describes what this server does and
-                        what capabilities it offers. The summary will be read by another AI agent deciding
-                        whether to route a request to this server, so use precise technical language and
-                        emphasize what kinds of tasks or domains this server handles. If prompt templates
-                        are present, mention them as first-class capabilities alongside tools.
+                        Given an MCP server's metadata, tool catalog, prompt templates, and any
+                        server-supplied instructions, produce a concise summary (2-4 sentences,
+                        max 300 characters) that describes what this server does and what capabilities
+                        it offers. The summary will be read by another AI agent deciding whether to
+                        route a request to this server, so use precise technical language and emphasize
+                        what kinds of tasks or domains this server handles.
+
+                        When server-supplied instructions are present, treat them as the authoritative
+                        description of the server's purpose and recommended use — they override
+                        guesses inferred from tool names. If prompt templates are present, mention them
+                        as first-class capabilities alongside tools.
+
                         Output ONLY the summary text, no quotes or labels.
                         """),
                     new(ChatRole.User, userContent)

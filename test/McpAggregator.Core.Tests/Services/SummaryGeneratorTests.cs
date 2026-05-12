@@ -171,4 +171,40 @@ public class SummaryGeneratorTests
         Assert.IsTrue(userText.Contains("tool_a"), "User prompt should contain tool names");
         Assert.IsTrue(userText.Contains("tool_b"), "User prompt should contain tool names");
     }
+
+    [TestMethod]
+    public async Task GenerateSummaryAsync_IncludesRemoteMetadataAndInstructions()
+    {
+        IEnumerable<ChatMessage>? capturedMessages = null;
+        var expectations = new IChatClientCreateExpectations();
+        expectations.Setups.GetResponseAsync(
+                Arg.Any<IEnumerable<ChatMessage>>(),
+                Arg.IsDefault<ChatOptions?>(),
+                Arg.Any<CancellationToken>())
+            .Callback((messages, _, _) =>
+            {
+                capturedMessages = messages;
+                return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Summary")));
+            });
+        var client = expectations.Instance();
+        var gen = CreateGenerator(chatClient: client, enabled: true);
+
+        var server = SampleServer();
+        server.RemoteName = "weather-api";
+        server.RemoteTitle = "Weather API";
+        server.RemoteVersion = "2.3.1";
+        server.RemoteInstructions = "Use get_forecast for multi-day predictions and get_current for now-only queries.";
+
+        await gen.GenerateSummaryAsync(server, SampleTools());
+
+        Assert.IsNotNull(capturedMessages);
+        var userText = capturedMessages!.ToList()[1].Text;
+        Assert.IsNotNull(userText);
+        Assert.IsTrue(userText!.Contains("Weather API"), "User prompt should contain remote title");
+        Assert.IsTrue(userText.Contains("weather-api"), "User prompt should contain remote name");
+        Assert.IsTrue(userText.Contains("2.3.1"), "User prompt should contain remote version");
+        Assert.IsTrue(userText.Contains("get_forecast"), "User prompt should contain remote instructions verbatim");
+        Assert.IsTrue(userText.Contains("Server-supplied instructions"),
+            "User prompt should label the instructions section");
+    }
 }

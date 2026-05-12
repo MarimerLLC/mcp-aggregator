@@ -96,6 +96,11 @@ public class ToolIndex
                 }
             }
 
+            // Populate after the tools call so a fresh connect has refreshed the cached metadata.
+            index.RemoteName = server.RemoteName;
+            index.RemoteTitle = server.RemoteTitle;
+            index.RemoteVersion = server.RemoteVersion;
+
             results.Add(index);
         }
 
@@ -126,6 +131,10 @@ public class ToolIndex
             Enabled = server.Enabled,
             Available = true,
             HasSkillDocument = server.HasSkillDocument,
+            RemoteName = server.RemoteName,
+            RemoteTitle = server.RemoteTitle,
+            RemoteVersion = server.RemoteVersion,
+            RemoteInstructions = server.RemoteInstructions,
             Tools = tools,
             Prompts = prompts
         };

@@ -204,6 +204,22 @@ public sealed class ConnectionManager : IAsyncDisposable
         _connections[server.Name] = state;
         AggregatorTelemetry.ActiveConnections.Add(1, new TagList { { "server_name", server.Name } });
         _logger.LogInformation("Connected to '{Server}'", server.Name);
+
+        try
+        {
+            await _registry.UpdateRemoteMetadataAsync(
+                server.Name,
+                client.ServerInfo?.Name,
+                client.ServerInfo?.Title,
+                client.ServerInfo?.Version,
+                client.ServerInstructions,
+                ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to capture remote metadata from '{Server}'", server.Name);
+        }
+
         return state;
     }
 
