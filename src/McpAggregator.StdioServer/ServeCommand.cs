@@ -79,7 +79,7 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
         }
 
         // MCP server with stdio transport
-        builder.Services.AddMcpServer()
+        builder.Services.AddAggregatorMcpServer()
             .WithStdioServerTransport()
             .WithToolsFromAssembly(typeof(ConsumerTools).Assembly);
 
