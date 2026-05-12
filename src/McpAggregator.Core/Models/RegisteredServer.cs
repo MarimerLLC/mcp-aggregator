@@ -16,4 +16,12 @@ public class RegisteredServer
     public string? RemoteTitle { get; set; }
     public string? RemoteVersion { get; set; }
     public string? RemoteInstructions { get; set; }
+
+    // Snapshot of the downstream's identity and surface area at the moment the
+    // skill document was last authored, used to detect drift between the skill
+    // and the actual server. Null when no skill has been recorded or when the
+    // server was unreachable at update time.
+    public string? SkillRecordedVersion { get; set; }
+    public string? SkillRecordedFingerprint { get; set; }
+    public DateTimeOffset? SkillRecordedAt { get; set; }
 }

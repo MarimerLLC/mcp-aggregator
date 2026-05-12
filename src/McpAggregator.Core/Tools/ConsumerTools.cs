@@ -79,7 +79,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "refresh_service")]
-    [Description("Drop the cached metadata and connection for a registered MCP server, forcing a fresh reconnect and metadata reload on the next use. Use this after a downstream server has been updated.")]
+    [Description("Drop the cached connection, ServerInfo, tool list, and prompt list for a registered MCP server so the next call re-fetches them from the downstream. Does NOT touch the skill document — that is admin-authored via update_skill. Use this after a downstream server has been upgraded or restarted.")]
     public static async Task<string> RefreshService(
         ToolIndex toolIndex,
         ConnectionManager connectionManager,
@@ -88,7 +88,7 @@ public class ConsumerTools
     {
         toolIndex.InvalidateCache(serverName);
         await connectionManager.DisconnectAsync(serverName);
-        return $"Cache and connection cleared for '{serverName}'. Metadata will be reloaded on next use.";
+        return $"Cleared cached connection, ServerInfo, tools, and prompts for '{serverName}'. Skill document was not modified. Metadata will be reloaded on next use.";
     }
 
     [McpServerTool(Name = "enable_service")]

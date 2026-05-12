@@ -105,6 +105,20 @@ public class ServerRegistry
         await PersistAsync(ct);
     }
 
+    public async Task UpdateSkillSnapshotAsync(
+        string name,
+        string? recordedVersion,
+        string? recordedFingerprint,
+        DateTimeOffset? recordedAt,
+        CancellationToken ct = default)
+    {
+        var server = Get(name);
+        server.SkillRecordedVersion = recordedVersion;
+        server.SkillRecordedFingerprint = recordedFingerprint;
+        server.SkillRecordedAt = recordedAt;
+        await PersistAsync(ct);
+    }
+
     public async Task UpdateRemoteMetadataAsync(
         string name,
         string? remoteName,

@@ -350,6 +350,48 @@ public class ServerRegistryTests
         Assert.AreEqual("A great server", registry.Get("test-server").AiSummary);
     }
 
+    [TestMethod]
+    public async Task UpdateSkillSnapshotAsync_StoresAllFields()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+        await registry.RegisterAsync(TestHelpers.StdioServer());
+        var when = DateTimeOffset.UtcNow;
+
+        await registry.UpdateSkillSnapshotAsync("test-server", "1.2.3", "abc123", when);
+
+        var server = registry.Get("test-server");
+        Assert.AreEqual("1.2.3", server.SkillRecordedVersion);
+        Assert.AreEqual("abc123", server.SkillRecordedFingerprint);
+        Assert.AreEqual(when, server.SkillRecordedAt);
+    }
+
+    [TestMethod]
+    public async Task UpdateSkillSnapshotAsync_ClearsExistingSnapshot_WhenNullsPassed()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+        await registry.RegisterAsync(TestHelpers.StdioServer());
+        await registry.UpdateSkillSnapshotAsync("test-server", "1.0.0", "fp", DateTimeOffset.UtcNow);
+
+        await registry.UpdateSkillSnapshotAsync("test-server", null, null, null);
+
+        var server = registry.Get("test-server");
+        Assert.IsNull(server.SkillRecordedVersion);
+        Assert.IsNull(server.SkillRecordedFingerprint);
+        Assert.IsNull(server.SkillRecordedAt);
+    }
+
+    [TestMethod]
+    public void UpdateSkillSnapshotAsync_UnknownServer_ThrowsServerNotFound()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        Assert.ThrowsException<Exceptions.ServerNotFoundException>(
+            () => registry.UpdateSkillSnapshotAsync("missing", "v", "fp", DateTimeOffset.UtcNow).GetAwaiter().GetResult());
+    }
+
     // --- GetAll ---
 
     [TestMethod]
