@@ -26,7 +26,7 @@ public sealed class ServeSettings : CommandSettings
 
 public sealed class ServeCommand : AsyncCommand<ServeSettings>
 {
-    public override async Task<int> ExecuteAsync(CommandContext context, ServeSettings settings, CancellationToken cancellation)
+    protected override async Task<int> ExecuteAsync(CommandContext context, ServeSettings settings, CancellationToken cancellation)
     {
         var logDir = settings.LogDir ?? Path.Combine(AppContext.BaseDirectory, "logs");
 
