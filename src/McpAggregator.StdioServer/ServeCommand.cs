@@ -26,7 +26,7 @@ public sealed class ServeSettings : CommandSettings
 
 public sealed class ServeCommand : AsyncCommand<ServeSettings>
 {
-    public override async Task<int> ExecuteAsync(CommandContext context, ServeSettings settings, CancellationToken cancellation)
+    protected override async Task<int> ExecuteAsync(CommandContext context, ServeSettings settings, CancellationToken cancellation)
     {
         var logDir = settings.LogDir ?? Path.Combine(AppContext.BaseDirectory, "logs");
 
@@ -79,7 +79,7 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
         }
 
         // MCP server with stdio transport
-        builder.Services.AddMcpServer()
+        builder.Services.AddAggregatorMcpServer()
             .WithStdioServerTransport()
             .WithToolsFromAssembly(typeof(ConsumerTools).Assembly);
 
