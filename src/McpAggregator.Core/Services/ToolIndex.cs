@@ -5,6 +5,7 @@ using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Client;
+using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Services;
 
@@ -14,6 +15,7 @@ public class ToolIndex
     private readonly ConnectionManager _connectionManager;
     private readonly SkillStore _skillStore;
     private readonly AggregatorOptions _options;
+    private readonly IOptions<McpServerOptions>? _mcpServerOptions;
     private readonly ILogger<ToolIndex> _logger;
 
     private readonly ConcurrentDictionary<string, CachedTools> _cache = new(StringComparer.OrdinalIgnoreCase);
@@ -27,12 +29,14 @@ public class ToolIndex
         ConnectionManager connectionManager,
         SkillStore skillStore,
         IOptions<AggregatorOptions> options,
-        ILogger<ToolIndex> logger)
+        ILogger<ToolIndex> logger,
+        IOptions<McpServerOptions>? mcpServerOptions = null)
     {
         _registry = registry;
         _connectionManager = connectionManager;
         _skillStore = skillStore;
         _options = options.Value;
+        _mcpServerOptions = mcpServerOptions;
         _logger = logger;
 
         _registry.RegistryChanged += () =>
@@ -55,6 +59,7 @@ public class ToolIndex
         // Advertise the aggregator itself if it has a skill document
         if (_skillStore.Exists(_options.SelfName))
         {
+            var selfInfo = _mcpServerOptions?.Value.ServerInfo;
             results.Add(new ServiceIndex
             {
                 Name = _options.SelfName,
@@ -62,7 +67,10 @@ public class ToolIndex
                 Description = _options.SelfDescription,
                 Enabled = true,
                 Available = true,
-                HasSkillDocument = true
+                HasSkillDocument = true,
+                RemoteName = selfInfo?.Name,
+                RemoteTitle = selfInfo?.Title,
+                RemoteVersion = selfInfo?.Version
             });
         }
 
@@ -74,14 +82,19 @@ public class ToolIndex
                 DisplayName = server.DisplayName,
                 Description = server.AiSummary ?? server.Description,
                 Enabled = server.Enabled,
-                HasSkillDocument = server.HasSkillDocument
+                HasSkillDocument = server.HasSkillDocument,
+                SkillRecordedVersion = server.SkillRecordedVersion,
+                SkillRecordedAt = server.SkillRecordedAt
             };
+
+            List<ToolDetail>? tools = null;
+            List<PromptDetail>? prompts = null;
 
             if (server.Enabled)
             {
                 try
                 {
-                    var tools = await GetToolsForServerAsync(server.Name, ct);
+                    tools = await GetToolsForServerAsync(server.Name, ct);
                     index.Available = true;
                     index.Tools = tools.Select(t => new ToolSummary
                     {
@@ -94,17 +107,53 @@ public class ToolIndex
                     _logger.LogWarning(ex, "Failed to get tools for '{Server}'", server.Name);
                     index.Available = false;
                 }
+
+                if (index.Available && server.HasSkillDocument)
+                {
+                    try
+                    {
+                        prompts = await GetPromptsForServerAsync(server.Name, ct);
+                    }
+                    catch
+                    {
+                        prompts = [];
+                    }
+                }
             }
 
             // Populate after the tools call so a fresh connect has refreshed the cached metadata.
             index.RemoteName = server.RemoteName;
             index.RemoteTitle = server.RemoteTitle;
             index.RemoteVersion = server.RemoteVersion;
+            index.SkillFreshness = ComputeFreshness(server, tools, prompts);
 
             results.Add(index);
         }
 
         return results;
+    }
+
+    private static string? ComputeFreshness(
+        RegisteredServer server,
+        IReadOnlyList<ToolDetail>? currentTools,
+        IReadOnlyList<PromptDetail>? currentPrompts)
+    {
+        if (!server.HasSkillDocument)
+            return null;
+
+        if (string.IsNullOrEmpty(server.SkillRecordedFingerprint))
+            return "unknown";
+
+        if (currentTools is null)
+            return "unknown";
+
+        var currentFingerprint = SkillFingerprint.Compute(
+            currentTools.Select(t => t.Name),
+            currentPrompts?.Select(p => p.Name) ?? []);
+
+        return string.Equals(currentFingerprint, server.SkillRecordedFingerprint, StringComparison.Ordinal)
+            ? "fresh"
+            : "stale";
     }
 
     public async Task<ServiceDetails> GetDetailsAsync(string serverName, CancellationToken ct = default)
@@ -135,6 +184,9 @@ public class ToolIndex
             RemoteTitle = server.RemoteTitle,
             RemoteVersion = server.RemoteVersion,
             RemoteInstructions = server.RemoteInstructions,
+            SkillFreshness = ComputeFreshness(server, tools, prompts),
+            SkillRecordedVersion = server.SkillRecordedVersion,
+            SkillRecordedAt = server.SkillRecordedAt,
             Tools = tools,
             Prompts = prompts
         };

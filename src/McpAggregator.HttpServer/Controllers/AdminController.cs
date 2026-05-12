@@ -13,17 +13,20 @@ public class AdminController : ControllerBase
     private readonly ConnectionManager _connectionManager;
     private readonly SkillStore _skillStore;
     private readonly SummaryGenerator _summaryGenerator;
+    private readonly ToolIndex _toolIndex;
 
     public AdminController(
         ServerRegistry registry,
         ConnectionManager connectionManager,
         SkillStore skillStore,
-        SummaryGenerator summaryGenerator)
+        SummaryGenerator summaryGenerator,
+        ToolIndex toolIndex)
     {
         _registry = registry;
         _connectionManager = connectionManager;
         _skillStore = skillStore;
         _summaryGenerator = summaryGenerator;
+        _toolIndex = toolIndex;
     }
 
     [HttpPost]
@@ -169,6 +172,7 @@ public class AdminController : ControllerBase
         _registry.Get(name); // Validate exists
         await _skillStore.SetAsync(name, request.Markdown, ct);
         await _registry.UpdateSkillFlagAsync(name, true, ct);
+        await SkillSnapshot.CaptureAsync(_registry, _toolIndex, name, ct);
         return Ok(new { message = $"Skill document updated for '{name}'." });
     }
 

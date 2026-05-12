@@ -114,6 +114,7 @@ public class AdminTools
     public static async Task<string> UpdateSkill(
         ServerRegistry registry,
         SkillStore skillStore,
+        ToolIndex toolIndex,
         [Description("The name of the registered server")] string serverName,
         [Description("Markdown content for the skill document")] string markdown,
         CancellationToken ct)
@@ -122,6 +123,7 @@ public class AdminTools
         registry.Get(serverName); // Validate server exists
         await skillStore.SetAsync(serverName, markdown, ct);
         await registry.UpdateSkillFlagAsync(serverName, true, ct);
+        await SkillSnapshot.CaptureAsync(registry, toolIndex, serverName, ct);
         return $"Skill document updated for '{serverName}'.";
     }
 
