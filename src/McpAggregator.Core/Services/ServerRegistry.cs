@@ -105,6 +105,31 @@ public class ServerRegistry
         await PersistAsync(ct);
     }
 
+    public async Task UpdateRemoteMetadataAsync(
+        string name,
+        string? remoteName,
+        string? remoteTitle,
+        string? remoteVersion,
+        string? remoteInstructions,
+        CancellationToken ct = default)
+    {
+        var server = Get(name);
+        if (server.RemoteName == remoteName
+            && server.RemoteTitle == remoteTitle
+            && server.RemoteVersion == remoteVersion
+            && server.RemoteInstructions == remoteInstructions)
+        {
+            return;
+        }
+
+        server.RemoteName = remoteName;
+        server.RemoteTitle = remoteTitle;
+        server.RemoteVersion = remoteVersion;
+        server.RemoteInstructions = remoteInstructions;
+        await PersistAsync(ct);
+        _logger.LogDebug("Updated remote metadata for '{Name}' (version: {Version})", name, remoteVersion ?? "unknown");
+    }
+
     public async Task SetEnabledAsync(string name, bool enabled, CancellationToken ct = default)
     {
         var server = Get(name);

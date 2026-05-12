@@ -8,6 +8,13 @@ public class ServiceIndex
     public bool Enabled { get; set; }
     public bool Available { get; set; }
     public bool HasSkillDocument { get; set; }
+
+    // Identity reported by the downstream MCP server's ServerInfo (compact identity only;
+    // the full server-supplied instructions are surfaced via ServiceDetails).
+    public string? RemoteName { get; set; }
+    public string? RemoteTitle { get; set; }
+    public string? RemoteVersion { get; set; }
+
     public List<ToolSummary> Tools { get; set; } = [];
 }
 
@@ -25,6 +32,13 @@ public class ServiceDetails
     public bool Enabled { get; set; }
     public bool Available { get; set; }
     public bool HasSkillDocument { get; set; }
+
+    // Metadata supplied by the downstream MCP server itself during the initialize handshake.
+    public string? RemoteName { get; set; }
+    public string? RemoteTitle { get; set; }
+    public string? RemoteVersion { get; set; }
+    public string? RemoteInstructions { get; set; }
+
     public List<ToolDetail> Tools { get; set; } = [];
     public List<PromptDetail> Prompts { get; set; } = [];
 }
