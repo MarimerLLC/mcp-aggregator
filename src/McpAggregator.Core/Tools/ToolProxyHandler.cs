@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
@@ -12,15 +13,20 @@ namespace McpAggregator.Core.Tools;
 public class ToolProxyHandler
 {
     private readonly ConnectionManager _connectionManager;
+    private readonly ToolIndex _toolIndex;
     private readonly AggregatorOptions _options;
     private readonly ILogger<ToolProxyHandler> _logger;
 
+    private static readonly JsonSerializerOptions SchemaHintJsonOptions = new() { WriteIndented = false };
+
     public ToolProxyHandler(
         ConnectionManager connectionManager,
+        ToolIndex toolIndex,
         IOptions<AggregatorOptions> options,
         ILogger<ToolProxyHandler> logger)
     {
         _connectionManager = connectionManager;
+        _toolIndex = toolIndex;
         _options = options.Value;
         _logger = logger;
     }
@@ -40,6 +46,66 @@ public class ToolProxyHandler
             _logger.LogDebug(
                 "Tool '{Tool}' on '{Server}' has IsError=null (downstream did not set error flag explicitly)",
                 toolName, serverName);
+        }
+    }
+
+    /// <summary>
+    /// When a tool call comes back as an error, checks the supplied arguments against the
+    /// downstream tool's input schema. Returns a corrective message (listing the missing/unknown
+    /// keys and the full schema) only when there is an actual argument mismatch — genuine tool-side
+    /// errors on schema-valid arguments are left untouched. Returns null when no hint applies.
+    /// </summary>
+    private async Task<string?> TryBuildArgumentHintAsync(
+        string serverName,
+        string toolName,
+        IReadOnlyDictionary<string, object?>? providedArgs,
+        CancellationToken ct)
+    {
+        try
+        {
+            var tools = await _toolIndex.GetToolsForServerAsync(serverName, ct);
+            var tool = tools.FirstOrDefault(t => string.Equals(t.Name, toolName, StringComparison.Ordinal));
+
+            if (tool?.InputSchema is not JsonElement schema || schema.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var propertyNames = schema.TryGetProperty("properties", out var props) && props.ValueKind == JsonValueKind.Object
+                ? props.EnumerateObject().Select(p => p.Name).ToList()
+                : [];
+
+            var required = schema.TryGetProperty("required", out var req) && req.ValueKind == JsonValueKind.Array
+                ? req.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!).ToList()
+                : [];
+
+            var providedKeys = providedArgs?.Keys.ToList() ?? [];
+
+            var missingRequired = required.Where(r => !providedKeys.Contains(r, StringComparer.Ordinal)).ToList();
+            // Only flag unknown keys when the schema actually declares its properties.
+            var unknownKeys = propertyNames.Count > 0
+                ? providedKeys.Where(k => !propertyNames.Contains(k, StringComparer.Ordinal)).ToList()
+                : [];
+
+            if (missingRequired.Count == 0 && unknownKeys.Count == 0)
+                return null;
+
+            var schemaText = JsonSerializer.Serialize(schema, SchemaHintJsonOptions);
+
+            var sb = new StringBuilder();
+            sb.Append("Argument mismatch for tool '").Append(toolName).Append("' on '").Append(serverName).Append("'. ");
+            if (missingRequired.Count > 0)
+                sb.Append("Missing required parameter(s): [").Append(string.Join(", ", missingRequired)).Append("]. ");
+            if (unknownKeys.Count > 0)
+                sb.Append("Unrecognized argument key(s): [").Append(string.Join(", ", unknownKeys)).Append("]. ");
+            if (providedKeys.Count > 0)
+                sb.Append("You sent: [").Append(string.Join(", ", providedKeys)).Append("]. ");
+            sb.Append("Re-invoke with arguments matching this input schema: ").Append(schemaText);
+
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to build argument hint for '{Tool}' on '{Server}'", toolName, serverName);
+            return null;
         }
     }
 
@@ -101,6 +167,20 @@ public class ToolProxyHandler
             {
                 var errorText = string.Join("\n", result.Content.OfType<TextContentBlock>().Select(b => b.Text));
                 _logger.LogWarning("Tool '{Tool}' on '{Server}' returned error: {Error}", toolName, serverName, errorText);
+
+                // Self-correction: a common failure is the caller guessing parameter names
+                // (e.g. from a tool description) instead of the actual input schema. Downstream
+                // SDKs sanitize the binding error to a generic message, so attach the authoritative
+                // schema and the specific mismatch so the model can retry without a separate
+                // get_service_details round-trip.
+                var hint = await TryBuildArgumentHintAsync(serverName, toolName, args, ct);
+                if (hint is not null)
+                {
+                    result.Content = [.. result.Content, new TextContentBlock { Text = hint }];
+                    _logger.LogInformation(
+                        "Attached argument-schema hint to error result for '{Tool}' on '{Server}'",
+                        toolName, serverName);
+                }
             }
 
             resultLabel = "success";
