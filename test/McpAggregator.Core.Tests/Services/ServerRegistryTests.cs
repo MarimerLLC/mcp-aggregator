@@ -206,6 +206,229 @@ public class ServerRegistryTests
     }
 
     [TestMethod]
+    public async Task RegisterAsync_StdioWithHeaders_ThrowsInvalidTransport()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        var server = new RegisteredServer
+        {
+            Name = "bad",
+            Transport = new TransportConfig
+            {
+                Type = TransportType.Stdio,
+                Command = "node",
+                Headers = new Dictionary<string, string> { ["Authorization"] = "Bearer x" }
+            }
+        };
+
+        await Assert.ThrowsExceptionAsync<InvalidTransportConfigException>(
+            () => registry.RegisterAsync(server));
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_StdioWithConnectionTimeout_ThrowsInvalidTransport()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        var server = new RegisteredServer
+        {
+            Name = "bad",
+            Transport = new TransportConfig
+            {
+                Type = TransportType.Stdio,
+                Command = "node",
+                ConnectionTimeout = TimeSpan.FromSeconds(30)
+            }
+        };
+
+        await Assert.ThrowsExceptionAsync<InvalidTransportConfigException>(
+            () => registry.RegisterAsync(server));
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_HttpBlankHeaderName_ThrowsInvalidTransport()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        var server = new RegisteredServer
+        {
+            Name = "bad",
+            Transport = new TransportConfig
+            {
+                Type = TransportType.Http,
+                Url = "http://localhost:8080",
+                Headers = new Dictionary<string, string> { ["   "] = "value" }
+            }
+        };
+
+        await Assert.ThrowsExceptionAsync<InvalidTransportConfigException>(
+            () => registry.RegisterAsync(server));
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_HttpNonPositiveConnectionTimeout_ThrowsInvalidTransport()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        var server = new RegisteredServer
+        {
+            Name = "bad",
+            Transport = new TransportConfig
+            {
+                Type = TransportType.Http,
+                Url = "http://localhost:8080",
+                ConnectionTimeout = TimeSpan.Zero
+            }
+        };
+
+        await Assert.ThrowsExceptionAsync<InvalidTransportConfigException>(
+            () => registry.RegisterAsync(server));
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_HttpWithHeadersAndTimeout_Succeeds()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        var server = new RegisteredServer
+        {
+            Name = "good",
+            Transport = new TransportConfig
+            {
+                Type = TransportType.Http,
+                Url = "http://localhost:8080",
+                Headers = new Dictionary<string, string> { ["Authorization"] = "Bearer ${TOKEN}" },
+                ConnectionTimeout = TimeSpan.FromSeconds(45)
+            }
+        };
+
+        await registry.RegisterAsync(server);
+
+        var stored = registry.Get("good");
+        Assert.AreEqual("Bearer ${TOKEN}", stored.Transport.Headers!["Authorization"]);
+        Assert.AreEqual(TimeSpan.FromSeconds(45), stored.Transport.ConnectionTimeout);
+    }
+
+    // --- UpdateServerAsync ---
+
+    [TestMethod]
+    public async Task UpdateServerAsync_ReplacesTransport()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+        await registry.RegisterAsync(TestHelpers.HttpServer("api"));
+
+        await registry.UpdateServerAsync("api", new TransportConfig
+        {
+            Type = TransportType.Http,
+            Url = "https://api.example.com/mcp",
+            Headers = new Dictionary<string, string> { ["Authorization"] = "Bearer rotated" }
+        }, null, null);
+
+        var server = registry.Get("api");
+        Assert.AreEqual("https://api.example.com/mcp", server.Transport.Url);
+        Assert.AreEqual("Bearer rotated", server.Transport.Headers!["Authorization"]);
+    }
+
+    [TestMethod]
+    public async Task UpdateServerAsync_UpdatesMetadataOnly_WhenTransportNull()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+        await registry.RegisterAsync(TestHelpers.HttpServer("api"));
+
+        await registry.UpdateServerAsync("api", null, "New Name", "New description");
+
+        var server = registry.Get("api");
+        Assert.AreEqual("New Name", server.DisplayName);
+        Assert.AreEqual("New description", server.Description);
+        Assert.AreEqual("http://localhost:8080", server.Transport.Url);
+    }
+
+    [TestMethod]
+    public async Task UpdateServerAsync_PreservesSummarySkillAndRegistration()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+        await registry.RegisterAsync(TestHelpers.HttpServer("api"));
+        await registry.UpdateSummaryAsync("api", "An AI summary");
+        await registry.UpdateSkillFlagAsync("api", true);
+        await registry.SetEnabledAsync("api", false);
+        await registry.UpdateSkillSnapshotAsync("api", "1.0.0", "fp", DateTimeOffset.UtcNow);
+        var registeredAt = registry.Get("api").RegisteredAt;
+        var recordedAt = registry.Get("api").SkillRecordedAt;
+
+        await registry.UpdateServerAsync("api", new TransportConfig
+        {
+            Type = TransportType.Http,
+            Url = "https://api.example.com/mcp"
+        }, null, null);
+
+        var server = registry.Get("api");
+        Assert.AreEqual("An AI summary", server.AiSummary);
+        Assert.IsTrue(server.HasSkillDocument);
+        Assert.IsFalse(server.Enabled);
+        Assert.AreEqual(registeredAt, server.RegisteredAt);
+        Assert.AreEqual("1.0.0", server.SkillRecordedVersion);
+        Assert.AreEqual("fp", server.SkillRecordedFingerprint);
+        Assert.AreEqual(recordedAt, server.SkillRecordedAt);
+    }
+
+    [TestMethod]
+    public async Task UpdateServerAsync_InvalidTransport_Throws()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+        await registry.RegisterAsync(TestHelpers.HttpServer("api"));
+
+        await Assert.ThrowsExceptionAsync<InvalidTransportConfigException>(
+            () => registry.UpdateServerAsync("api", new TransportConfig
+            {
+                Type = TransportType.Http,
+                Url = "not-a-url"
+            }, null, null));
+    }
+
+    [TestMethod]
+    public async Task UpdateServerAsync_UnknownServer_ThrowsServerNotFound()
+    {
+        var persistence = EmptyPersistence();
+        var registry = CreateRegistry(persistence);
+
+        await Assert.ThrowsExceptionAsync<ServerNotFoundException>(
+            () => registry.UpdateServerAsync("missing", null, "name", null));
+    }
+
+    [TestMethod]
+    public async Task UpdateServerAsync_PersistsAndFiresRegistryChanged()
+    {
+        var saveCount = 0;
+        var expectations = new IRegistryPersistenceCreateExpectations();
+        expectations.Setups.LoadAsync(Arg.Any<CancellationToken>())
+            .ReturnValue(Task.FromResult(new RegistryData()));
+        expectations.Setups.SaveAsync(Arg.Any<RegistryData>(), Arg.Any<CancellationToken>())
+            .Callback((_, _) =>
+            {
+                Interlocked.Increment(ref saveCount);
+                return Task.CompletedTask;
+            });
+        var registry = CreateRegistry(expectations.Instance());
+        await registry.RegisterAsync(TestHelpers.HttpServer("api"));
+        var fired = false;
+        registry.RegistryChanged += () => fired = true;
+
+        await registry.UpdateServerAsync("api", null, "New Name", null);
+
+        Assert.AreEqual(2, saveCount);
+        Assert.IsTrue(fired);
+    }
+
+    [TestMethod]
     public async Task RegisterAsync_FiresRegistryChanged()
     {
         var persistence = EmptyPersistence();

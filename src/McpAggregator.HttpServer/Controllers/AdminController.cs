@@ -96,6 +96,43 @@ public class AdminController : ControllerBase
         return Created($"/api/services/{server.Name}", new { message = $"Server '{server.Name}' registered." });
     }
 
+    [HttpGet("{name}")]
+    public async Task<IActionResult> GetServer(string name, CancellationToken ct)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var server = _registry.Get(name);
+
+        return Ok(new
+        {
+            server.Name,
+            server.DisplayName,
+            server.Description,
+            Transport = server.Transport.ToRedacted(),
+            server.Enabled,
+            server.RegisteredAt,
+            server.HasSkillDocument,
+            server.AiSummary,
+            server.RemoteName,
+            server.RemoteTitle,
+            server.RemoteVersion,
+            server.SkillRecordedVersion,
+            server.SkillRecordedFingerprint,
+            server.SkillRecordedAt
+        });
+    }
+
+    [HttpPut("{name}")]
+    public async Task<IActionResult> UpdateServer(string name, [FromBody] UpdateServerRequest request, CancellationToken ct)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        await _registry.UpdateServerAsync(name, request.Transport, request.DisplayName, request.Description, ct);
+
+        // Drop any live connection so the next call reconnects with the new configuration.
+        await _connectionManager.DisconnectAsync(name);
+
+        return Ok(new { message = $"Server '{name}' updated." });
+    }
+
     [HttpPost("{name}/regenerate-summary")]
     public async Task<IActionResult> RegenerateSummary(string name, CancellationToken ct)
     {
@@ -199,5 +236,10 @@ public record RegisterServerRequest(
     string? DisplayName,
     string? Description,
     TransportConfig Transport);
+
+public record UpdateServerRequest(
+    string? DisplayName,
+    string? Description,
+    TransportConfig? Transport);
 
 public record UpdateSkillRequest(string Markdown);
