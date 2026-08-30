@@ -23,6 +23,8 @@ public class AdminTools
         [Description("Optional description")] string? description,
         [Description("For Stdio: JSON array of command arguments")] string? arguments,
         [Description("For Stdio: JSON object of environment variables")] string? environment,
+        [Description("For Http: JSON object of HTTP headers. Values may reference environment variables as ${VAR}, resolved at connect time.")] string? headers,
+        [Description("For Http: connection timeout in seconds")] int? connectionTimeoutSeconds,
         CancellationToken ct)
     {
         var transport = new TransportConfig();
@@ -45,6 +47,12 @@ public class AdminTools
                 break;
             case TransportType.Http:
                 transport.Url = endpoint;
+                transport.Headers = headers is not null
+                    ? JsonSerializer.Deserialize<Dictionary<string, string>>(headers)
+                    : null;
+                transport.ConnectionTimeout = connectionTimeoutSeconds is { } seconds
+                    ? TimeSpan.FromSeconds(seconds)
+                    : null;
                 break;
         }
 
@@ -68,6 +76,67 @@ public class AdminTools
             result += $" AI summary: {summary}";
 
         return result;
+    }
+
+    [McpServerTool(Name = "update_server")]
+    [Description("Update a registered server's transport configuration or metadata, preserving its skill document and AI summary.")]
+    public static async Task<string> UpdateServer(
+        ServerRegistry registry,
+        ConnectionManager connectionManager,
+        [Description("The name of the registered server")] string serverName,
+        [Description("Transport type: 'Stdio' or 'Http'. Required together with endpoint to replace the transport.")] string? transportType,
+        [Description("For Stdio: the command to run. For Http: the server URL. Required together with transportType.")] string? endpoint,
+        [Description("New display name")] string? displayName,
+        [Description("New description")] string? description,
+        [Description("For Stdio: JSON array of command arguments")] string? arguments,
+        [Description("For Stdio: JSON object of environment variables")] string? environment,
+        [Description("For Http: JSON object of HTTP headers. Values may reference environment variables as ${VAR}, resolved at connect time.")] string? headers,
+        [Description("For Http: connection timeout in seconds")] int? connectionTimeoutSeconds,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+
+        TransportConfig? transport = null;
+
+        if (transportType is not null || endpoint is not null)
+        {
+            if (transportType is null || endpoint is null)
+                return "Both 'transportType' and 'endpoint' must be supplied to replace the transport configuration.";
+
+            if (!Enum.TryParse<TransportType>(transportType, ignoreCase: true, out var tt))
+                return $"Invalid transport type '{transportType}'. Use 'Stdio' or 'Http'.";
+
+            transport = new TransportConfig { Type = tt };
+
+            switch (tt)
+            {
+                case TransportType.Stdio:
+                    transport.Command = endpoint;
+                    transport.Arguments = arguments is not null
+                        ? JsonSerializer.Deserialize<string[]>(arguments)
+                        : null;
+                    transport.Environment = environment is not null
+                        ? JsonSerializer.Deserialize<Dictionary<string, string>>(environment)
+                        : null;
+                    break;
+                case TransportType.Http:
+                    transport.Url = endpoint;
+                    transport.Headers = headers is not null
+                        ? JsonSerializer.Deserialize<Dictionary<string, string>>(headers)
+                        : null;
+                    transport.ConnectionTimeout = connectionTimeoutSeconds is { } seconds
+                        ? TimeSpan.FromSeconds(seconds)
+                        : null;
+                    break;
+            }
+        }
+
+        await registry.UpdateServerAsync(serverName, transport, displayName, description, ct);
+
+        // Drop any live connection so the next call reconnects with the new configuration.
+        await connectionManager.DisconnectAsync(serverName);
+
+        return $"Server '{serverName}' updated successfully.";
     }
 
     [McpServerTool(Name = "regenerate_summary")]

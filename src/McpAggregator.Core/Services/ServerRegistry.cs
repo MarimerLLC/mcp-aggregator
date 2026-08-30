@@ -144,6 +144,37 @@ public class ServerRegistry
         _logger.LogDebug("Updated remote metadata for '{Name}' (version: {Version})", name, remoteVersion ?? "unknown");
     }
 
+    /// <summary>
+    /// Replaces the supplied fields on an existing server. Deliberately preserves
+    /// <see cref="RegisteredServer.Enabled"/>, <see cref="RegisteredServer.RegisteredAt"/>,
+    /// the skill document flag and snapshot, the AI summary, and the captured remote metadata.
+    /// </summary>
+    public async Task UpdateServerAsync(
+        string name,
+        TransportConfig? transport,
+        string? displayName,
+        string? description,
+        CancellationToken ct = default)
+    {
+        var server = Get(name);
+
+        if (transport is not null)
+        {
+            ValidateTransportConfig(transport);
+            server.Transport = transport;
+        }
+
+        if (displayName is not null)
+            server.DisplayName = displayName;
+
+        if (description is not null)
+            server.Description = description;
+
+        await PersistAsync(ct);
+        _logger.LogInformation("Updated server '{Name}'", name);
+        RegistryChanged?.Invoke();
+    }
+
     public async Task SetEnabledAsync(string name, bool enabled, CancellationToken ct = default)
     {
         var server = Get(name);
@@ -165,12 +196,20 @@ public class ServerRegistry
             case TransportType.Stdio:
                 if (string.IsNullOrWhiteSpace(config.Command))
                     throw new InvalidTransportConfigException("Stdio transport requires a 'command'.");
+                if (config.Headers is { Count: > 0 })
+                    throw new InvalidTransportConfigException("'headers' is only valid for HTTP transport.");
+                if (config.ConnectionTimeout is not null)
+                    throw new InvalidTransportConfigException("'connectionTimeout' is only valid for HTTP transport.");
                 break;
             case TransportType.Http:
                 if (string.IsNullOrWhiteSpace(config.Url))
                     throw new InvalidTransportConfigException("HTTP transport requires a 'url'.");
                 if (!Uri.TryCreate(config.Url, UriKind.Absolute, out _))
                     throw new InvalidTransportConfigException($"Invalid URL: '{config.Url}'.");
+                if (config.Headers is not null && config.Headers.Keys.Any(string.IsNullOrWhiteSpace))
+                    throw new InvalidTransportConfigException("Header names cannot be blank.");
+                if (config.ConnectionTimeout is { } timeout && timeout <= TimeSpan.Zero)
+                    throw new InvalidTransportConfigException("'connectionTimeout' must be greater than zero.");
                 break;
             default:
                 throw new InvalidTransportConfigException($"Unknown transport type: {config.Type}");

@@ -76,21 +76,58 @@ curl -X POST http://localhost:8080/api/admin/services \
     "name": "my-server",
     "displayName": "My MCP Server",
     "description": "Does useful things",
-    "transportType": "Stdio",
-    "command": "npx",
-    "arguments": ["-y", "@example/mcp-server"]
+    "transport": {
+      "type": "Stdio",
+      "command": "npx",
+      "arguments": ["-y", "@example/mcp-server"]
+    }
   }'
 
-# Register an HTTP-based MCP server
+# Register an HTTP-based MCP server, with headers and a connection timeout
 curl -X POST http://localhost:8080/api/admin/services \
   -H "Content-Type: application/json" \
   -d '{
     "name": "remote-server",
     "description": "A remote MCP server",
-    "transportType": "Http",
-    "url": "http://localhost:3000/mcp"
+    "transport": {
+      "type": "Http",
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}",
+        "X-Tenant": "contoso"
+      },
+      "connectionTimeout": "00:00:30"
+    }
+  }'
+
+# Rotate a header without losing the server's skill document or AI summary
+curl -X PUT http://localhost:8080/api/admin/services/remote-server \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transport": {
+      "type": "Http",
+      "url": "http://localhost:3000/mcp",
+      "headers": { "Authorization": "Bearer ${REMOTE_MCP_TOKEN_V2}" }
+    }
   }'
 ```
+
+#### HTTP Headers and Secrets
+
+HTTP downstream servers accept arbitrary `headers` — an API key, a bearer token, a tenant
+identifier, whatever the server requires. A header value may be a literal, or it may reference
+a process environment variable with `${VAR}` syntax, so the registry file stays free of secrets:
+
+- References are expanded **at connect time**, not at registration time. Rotate the variable,
+  restart the aggregator (or let the connection go idle), and the next connection picks up the
+  new value.
+- Expansion works anywhere in the value, so `"Bearer ${GITHUB_TOKEN}"` works, not just a
+  whole-value reference. Write `$${` for a literal `${`.
+- A referenced variable that is not set fails the connection with an error naming the variable.
+- Header values (and stdio `environment` values) are masked as `***` wherever the aggregator
+  reads configuration back out, including `GET /api/admin/services/{name}`. They are never logged.
+
+`connectionTimeout` is optional and per-server; omit it to use the SDK default.
 
 **Via MCP tool call** (from an AI tool connected to the aggregator):
 
@@ -133,6 +170,7 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | `get_prompt` | Retrieve a rendered prompt template from a downstream server |
 | `register_server` | Register a new downstream MCP server |
 | `unregister_server` | Remove a registered server |
+| `update_server` | Update a registered server's transport configuration or metadata |
 | `update_skill` | Set or update a server's skill document |
 | `regenerate_summary` | Re-generate the AI summary for a registered server |
 
@@ -154,6 +192,8 @@ Available on the HTTP server only.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/admin/services` | Register a new server |
+| GET | `/api/admin/services/{name}` | Get a server's full configuration (secrets masked) |
+| PUT | `/api/admin/services/{name}` | Update a server's transport configuration or metadata |
 | DELETE | `/api/admin/services/{name}` | Unregister a server |
 | PUT | `/api/admin/services/{name}/skill` | Set or update a skill document |
 | POST | `/api/admin/services/{name}/regenerate-summary` | Re-generate AI summary |

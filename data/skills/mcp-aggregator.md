@@ -30,6 +30,7 @@ The same workflow applies via the REST API. Start with `GET /api` to get aggrega
 | `enable_service` | `POST /api/admin/services/{name}/enable` | Enable a disabled server, allowing tool invocations |
 | `disable_service` | `POST /api/admin/services/{name}/disable` | Disable a server, preventing tool invocations |
 | `register_server` | `POST /api/admin/services` | Register a new downstream server |
+| `update_server` | `PUT /api/admin/services/{name}` | Update a server's transport configuration or metadata |
 | `unregister_server` | `DELETE /api/admin/services/{name}` | Remove a registered server |
 | `update_skill` | `PUT /api/admin/services/{name}/skill` | Set or update a server's skill document |
 | `regenerate_summary` | `POST /api/admin/services/{name}/regenerate-summary` | Re-generate the AI summary for a server |
@@ -129,10 +130,48 @@ Use `register_server` to add new downstream servers at runtime:
 | `endpoint` | Yes | For Stdio: the command to run; for Http: the server URL. **The URL must be reachable from the aggregator's network**, not the client's — use cluster-internal DNS for k8s co-located servers. |
 | `arguments` | Stdio only | JSON array of command arguments |
 | `environment` | Stdio only | JSON object of environment variables |
+| `headers` | Http only | JSON object of HTTP headers, e.g. `{"Authorization": "Bearer ${TOKEN}"}`. Values may reference process environment variables with `${VAR}`, resolved at connect time; an unset variable fails the connection. |
+| `connectionTimeoutSeconds` | Http only | Connection timeout in seconds; omit for the default |
 | `displayName` | No | Human-friendly name |
 | `description` | No | What the server does |
 
 An AI-generated summary is created automatically at registration time from the server's tools and prompt templates. Summary generation requires the AI backend to be configured on the aggregator (`McpAggregator:AI:Enabled = true` with a valid endpoint and API key). If AI is not configured, registration still succeeds but no summary is generated.
+
+### Updating a Server
+
+Use `update_server` to change a registered server's transport configuration or metadata **without
+losing its skill document, AI summary, enabled state, or registration timestamp**. This is the tool
+for rotating an API key or bearer token on an HTTP downstream.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `serverName` | Yes | The registered server to update |
+| `transportType` | With `endpoint` | `"Stdio"` or `"Http"`. Supply both to replace the transport wholesale; supply neither to change metadata only. |
+| `endpoint` | With `transportType` | For Stdio: the command; for Http: the server URL |
+| `arguments` | Stdio only | JSON array of command arguments |
+| `environment` | Stdio only | JSON object of environment variables |
+| `headers` | Http only | JSON object of HTTP headers |
+| `connectionTimeoutSeconds` | Http only | Connection timeout in seconds |
+| `displayName` | No | New display name |
+| `description` | No | New description |
+
+The transport is replaced wholesale, not merged — omitting `headers` on an update that supplies
+`transportType` and `endpoint` clears the existing headers. Fetch the current configuration with
+`GET /api/admin/services/{name}` first if you need to preserve unrelated fields (header *values*
+come back masked, so re-supply them from their source).
+
+Any live connection to the server is dropped on update, so the next `invoke_tool` call reconnects
+with the new configuration.
+
+**Example — rotating a token:**
+```
+update_server(
+  serverName: "remote-api",
+  transportType: "Http",
+  endpoint: "https://api.example.com/mcp",
+  headers: {"Authorization": "Bearer ${REMOTE_API_TOKEN}"}
+)
+```
 
 ### Updating Skills
 

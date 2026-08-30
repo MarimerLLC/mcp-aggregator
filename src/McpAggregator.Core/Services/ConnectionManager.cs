@@ -183,11 +183,15 @@ public sealed class ConnectionManager : IAsyncDisposable
                     break;
 
                 case TransportType.Http:
-                    var httpTransport = new HttpClientTransport(new HttpClientTransportOptions
+                    var httpOptions = new HttpClientTransportOptions
                     {
                         Endpoint = new Uri(server.Transport.Url!),
-                        Name = server.Name
-                    }, _loggerFactory);
+                        Name = server.Name,
+                        AdditionalHeaders = TransportSecrets.ResolveHeaders(server.Transport)
+                    };
+                    if (server.Transport.ConnectionTimeout is { } connectionTimeout)
+                        httpOptions.ConnectionTimeout = connectionTimeout;
+                    var httpTransport = new HttpClientTransport(httpOptions, _loggerFactory);
                     transport = httpTransport;
                     client = await McpClient.CreateAsync(httpTransport, loggerFactory: _loggerFactory, cancellationToken: ct);
                     break;
