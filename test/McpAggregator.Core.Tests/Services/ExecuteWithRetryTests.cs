@@ -102,6 +102,23 @@ public class ExecuteWithRetryTests
     }
 
     [TestMethod]
+    public void ShouldRetry_ReturnsTrue_ForTimeoutException()
+    {
+        // SDK 2.0 surfaces TimeoutException directly from SSE connection failures
+        // instead of wrapping it in IOException.
+        Assert.IsTrue(InvokeShouldRetry(new TimeoutException("connect timed out")));
+    }
+
+    [TestMethod]
+    public void ShouldRetry_ReturnsTrue_ForWrappedTimeoutException()
+    {
+        // AutoDetect mode reports the SSE failure as the inner exception of an
+        // outer HttpRequestException.
+        var ex = new HttpRequestException("outer", new TimeoutException("inner"));
+        Assert.IsTrue(InvokeShouldRetry(ex));
+    }
+
+    [TestMethod]
     public void ShouldRetry_ReturnsTrue_ForWrappedIOException()
     {
         var ex = new InvalidOperationException("outer", new IOException("inner"));
