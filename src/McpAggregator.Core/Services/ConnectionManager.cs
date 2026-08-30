@@ -129,13 +129,20 @@ public sealed class ConnectionManager : IAsyncDisposable
         if (ex is OperationCanceledException or AggregatorException)
             return false;
 
+        // As of SDK 2.0 the SSE transport propagates the underlying HttpRequestException,
+        // TimeoutException, or genuine I/O exception instead of always wrapping connection
+        // failures in IOException, so TimeoutException must be treated as retryable here.
+        // In AutoDetect mode the real failure arrives as the InnerException of an outer
+        // HttpRequestException, which the InnerException checks below cover.
         return ex is System.IO.IOException
             or System.Net.Http.HttpRequestException
             or System.Net.Sockets.SocketException
+            or TimeoutException
             or ObjectDisposedException
             || ex.InnerException is System.IO.IOException
             or System.Net.Http.HttpRequestException
             or System.Net.Sockets.SocketException
+            or TimeoutException
             or ObjectDisposedException;
     }
 

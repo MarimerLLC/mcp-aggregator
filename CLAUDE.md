@@ -28,9 +28,25 @@ All settings under `McpAggregator` section in appsettings.json, overridable via 
 
 ## NuGet Packages
 
-- `ModelContextProtocol` 0.8.0-preview.1 — MCP server hosting + DI
-- `ModelContextProtocol.Core` 0.8.0-preview.1 — Client types (transitive)
-- `ModelContextProtocol.AspNetCore` 0.8.0-preview.1 — HTTP transport (HttpServer only)
+- `ModelContextProtocol` 2.2.0 — MCP server hosting + DI
+- `ModelContextProtocol.Core` 2.2.0 — Client types (transitive)
+- `ModelContextProtocol.AspNetCore` 2.2.0 — HTTP transport (HttpServer only)
+
+The 2.x line implements the MCP **2026-07-28** spec. Behaviors that matter here:
+
+- **Stateless HTTP is the default** (`HttpServerTransportOptions.Stateless`); `ServeCommand` still sets it
+  explicitly. Stateful-only options now emit `MCP9006`.
+- **Discovery-first negotiation** — clients probe `server/discover` and fall back to the legacy
+  `initialize` handshake for down-level servers. `client.ServerInfo` / `ServerInstructions` are
+  populated either way.
+- **SSE failures propagate the real exception** (`HttpRequestException`, `TimeoutException`, genuine
+  I/O) instead of a blanket `IOException` wrapper — `ConnectionManager.ShouldRetry` accounts for this.
+- **`Tool.inputSchema` is required on deserialization**; a downstream that omits it throws
+  `JsonException`, which `ToolIndex.GetToolsForServerAsync` translates into a named `AggregatorException`.
+- Roots/Sampling/Logging are deprecated (`MCP9005`), Tasks moved to `ModelContextProtocol.Extensions.Tasks`,
+  and `AuthorizationRedirectDelegate` is superseded by `AuthorizationCallbackHandler` (`MCP9007`).
+  None of these are used by this project today.
+- `Microsoft.Extensions.*` must be **10.0.10+** — the SDK pins `Hosting.Abstractions` to that floor.
 
 ## Key Types
 

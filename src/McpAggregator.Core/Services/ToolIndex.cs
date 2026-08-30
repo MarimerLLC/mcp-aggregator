@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using McpAggregator.Core.Configuration;
+using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -200,8 +201,23 @@ public class ToolIndex
             return cached.Tools;
         }
 
-        var mcpTools = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientTool>>(serverName,
-            async (client, token) => await client.ListToolsAsync(cancellationToken: token), ct);
+        IList<McpClientTool> mcpTools;
+        try
+        {
+            mcpTools = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientTool>>(serverName,
+                async (client, token) => await client.ListToolsAsync(cancellationToken: token), ct);
+        }
+        catch (JsonException ex)
+        {
+            // MCP 2026-07-28 makes Tool.inputSchema required, so the SDK now throws instead of
+            // silently defaulting the schema. A downstream server that omits it is non-conformant;
+            // name it explicitly rather than surfacing a bare deserialization error.
+            _logger.LogWarning(ex, "Server '{Server}' returned a malformed tools/list payload", serverName);
+            throw new AggregatorException(
+                $"Server '{serverName}' returned a tools/list payload the MCP 2026-07-28 schema rejects " +
+                $"(every tool must declare an 'inputSchema'; an empty object is sufficient). " +
+                $"Underlying error: {ex.Message}", ex);
+        }
 
         var tools = mcpTools.Select(t => new ToolDetail
         {
