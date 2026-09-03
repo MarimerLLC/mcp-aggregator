@@ -6,3 +6,6 @@ logs/
 *.user
 *.suo
 appsettings.Development.json
+
+# Transient Claude Code plan files
+.claude/plans/
