@@ -5,6 +5,7 @@ using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Server;
 
@@ -241,8 +242,24 @@ public class ToolIndex
             return cached.Prompts;
         }
 
-        var mcpPrompts = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientPrompt>>(serverName,
-            async (client, token) => await client.ListPromptsAsync(cancellationToken: token), ct);
+        IList<McpClientPrompt> mcpPrompts;
+        try
+        {
+            mcpPrompts = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientPrompt>>(serverName,
+                async (client, token) => await client.ListPromptsAsync(cancellationToken: token), ct);
+        }
+        catch (McpProtocolException ex) when (ConnectionManager.IsUnsupportedCapability(ex))
+        {
+            // Prompts are an optional capability. A server that does not implement prompts/list
+            // has no prompts, which is a fact about the server rather than a failure to index it —
+            // AdminTools and AdminController already treat prompt listing as best-effort, and this
+            // is the same contract on the cached path. Cache the empty result so an unsupported
+            // call is not re-issued on every service-details fetch.
+            _logger.LogDebug(ex, "Server '{Server}' does not support prompts/list; indexing zero prompts", serverName);
+            List<PromptDetail> none = [];
+            _promptCache[serverName] = new CachedPrompts(none, DateTimeOffset.UtcNow);
+            return none;
+        }
 
         var prompts = mcpPrompts.Select(p => new PromptDetail
         {

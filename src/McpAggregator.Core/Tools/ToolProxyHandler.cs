@@ -6,6 +6,7 @@ using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 
 namespace McpAggregator.Core.Tools;
@@ -109,6 +110,40 @@ public class ToolProxyHandler
         }
     }
 
+    /// <summary>
+    /// When a call fails at the protocol level, checks whether the server declares the tool at
+    /// all. Returns a corrective message naming the tools it does declare when it does not, or
+    /// null when the tool is known — so a genuine downstream fault keeps propagating untouched.
+    /// </summary>
+    private async Task<string?> TryBuildUnknownToolHintAsync(
+        string serverName,
+        string toolName,
+        Exception cause,
+        CancellationToken ct)
+    {
+        try
+        {
+            var tools = await _toolIndex.GetToolsForServerAsync(serverName, ct);
+
+            if (tools.Any(t => string.Equals(t.Name, toolName, StringComparison.Ordinal)))
+                return null;
+
+            var available = tools.Count > 0
+                ? string.Join(", ", tools.Select(t => t.Name).Order(StringComparer.Ordinal))
+                : "(none)";
+
+            return $"Unknown tool '{toolName}' on server '{serverName}'. " +
+                   $"Available tools: [{available}]. " +
+                   $"Re-invoke with one of those names, or call get_service_details(serverName: \"{serverName}\") " +
+                   $"for their input schemas. Underlying error: {cause.Message}";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to build unknown-tool hint for '{Tool}' on '{Server}'", toolName, serverName);
+            return null;
+        }
+    }
+
     private static object? ConvertJsonElement(JsonElement element)
     {
         return element.ValueKind switch
@@ -185,6 +220,27 @@ public class ToolProxyHandler
 
             resultLabel = "success";
             return result;
+        }
+        catch (McpProtocolException ex) when (!ct.IsCancellationRequested)
+        {
+            // A downstream rejects an unknown tool name at the protocol level, so the call throws
+            // rather than returning an error result — which means the argument-schema
+            // self-correction above never runs and a raw JSON-RPC fault escapes as an unhandled
+            // exception. Give the caller the same self-correcting treatment: a structured error
+            // result naming the tools that do exist. Genuine downstream faults (the tool exists
+            // but the call failed) still propagate.
+            var hint = await TryBuildUnknownToolHintAsync(serverName, toolName, ex, ct);
+            if (hint is null)
+                throw;
+
+            _logger.LogWarning("Unknown tool '{Tool}' requested on '{Server}': {Error}",
+                toolName, serverName, ex.Message);
+
+            return new CallToolResult
+            {
+                IsError = true,
+                Content = [new TextContentBlock { Text = hint }]
+            };
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
