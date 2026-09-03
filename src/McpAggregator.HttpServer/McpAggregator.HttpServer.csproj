@@ -14,7 +14,10 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.AI.AzureAIInference" Version="10.0.0-*" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
-    <PackageReference Include="Spectre.Console.Cli" Version="0.*" />
+    <!-- Pinned exactly: Spectre.Console is pre-1.0, and AsyncCommand<T>.ExecuteAsync changed
+         both arity and accessibility between 0.53 and 0.55. A floating "0.*" makes restore
+         non-deterministic and breaks fresh clones (see issue #23). -->
+    <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.*" />
     <PackageReference Include="Scalar.AspNetCore" Version="2.*" />

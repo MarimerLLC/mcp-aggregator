@@ -48,6 +48,13 @@ The 2.x line implements the MCP **2026-07-28** spec. Behaviors that matter here:
   None of these are used by this project today.
 - `Microsoft.Extensions.*` must be **10.0.10+** — the SDK pins `Hosting.Abstractions` to that floor.
 
+`Spectre.Console.Cli` is **pinned to an exact version (0.55.0)**, not a floating `0.*`. The package is
+pre-1.0 and `AsyncCommand<T>.ExecuteAsync` changed both arity and accessibility between releases —
+`public abstract (CommandContext, TSettings)` through 0.53.1, `protected abstract (CommandContext,
+TSettings, CancellationToken)` in 0.55.0. A floating range made restore non-deterministic and broke
+fresh clones (issue #23). Bump it deliberately and re-check the `ServeCommand.ExecuteAsync` override
+in both hosts when you do.
+
 ## Key Types
 
 - `McpClient` (concrete class, not interface) — use `McpClient.CreateAsync()` factory
