@@ -5,6 +5,7 @@ using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -123,6 +124,15 @@ public sealed class ConnectionManager : IAsyncDisposable
             client = await GetClientAsync(serverName, ct);
             return await operation(client, ct);
         }
+        catch (Exception ex) when (IsUnsupportedCapability(ex))
+        {
+            // Not a fault: the server simply does not implement this optional method. Callers
+            // decide whether that is fatal, so the exception still propagates — but logging it
+            // at Error buries genuine failures under routine capability probes.
+            _logger.LogDebug(ex, "Server '{Server}' does not implement the requested method: {ExMessage}",
+                serverName, ex.Message);
+            throw;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException and not AggregatorException)
         {
             _logger.LogError(ex, "Non-retryable error executing operation on '{Server}': {ExType}: {ExMessage}",
@@ -130,6 +140,15 @@ public sealed class ConnectionManager : IAsyncDisposable
             throw;
         }
     }
+
+    /// <summary>
+    /// True when the failure is a downstream answering "I don't implement that method"
+    /// (JSON-RPC -32601) rather than something going wrong. Prompts, resources and the
+    /// 2026-07-28 <c>server/discover</c> probe are all optional, so down-level servers
+    /// reject them as a matter of course.
+    /// </summary>
+    internal static bool IsUnsupportedCapability(Exception ex)
+        => ex is McpProtocolException { ErrorCode: McpErrorCode.MethodNotFound };
 
     private static bool ShouldRetry(Exception ex)
     {
