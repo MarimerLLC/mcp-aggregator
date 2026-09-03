@@ -39,6 +39,13 @@ public sealed class ConnectionManager : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<ConnectionManager> _logger;
 
+    /// <summary>
+    /// Test seam: substitutes an in-memory transport for a registered server so the proxy path can
+    /// be exercised end-to-end without spawning a real downstream process. When null (always, in
+    /// production) the normal transport construction in <see cref="ConnectAsync"/> runs unchanged.
+    /// </summary>
+    internal Func<RegisteredServer, IClientTransport>? TransportFactoryOverride { get; set; }
+
     public ConnectionManager(
         ServerRegistry registry,
         IOptions<AggregatorOptions> options,
@@ -168,36 +175,44 @@ public sealed class ConnectionManager : IAsyncDisposable
 
         try
         {
-            switch (server.Transport.Type)
+            if (TransportFactoryOverride is { } factory)
             {
-                case TransportType.Stdio:
-                    var stdioTransport = new StdioClientTransport(new StdioClientTransportOptions
-                    {
-                        Name = server.Name,
-                        Command = server.Transport.Command!,
-                        Arguments = server.Transport.Arguments ?? [],
-                        EnvironmentVariables = server.Transport.Environment!
-                    }, _loggerFactory);
-                    transport = stdioTransport;
-                    client = await McpClient.CreateAsync(stdioTransport, loggerFactory: _loggerFactory, cancellationToken: ct);
-                    break;
+                transport = factory(server);
+                client = await McpClient.CreateAsync(transport, loggerFactory: _loggerFactory, cancellationToken: ct);
+            }
+            else
+            {
+                switch (server.Transport.Type)
+                {
+                    case TransportType.Stdio:
+                        var stdioTransport = new StdioClientTransport(new StdioClientTransportOptions
+                        {
+                            Name = server.Name,
+                            Command = server.Transport.Command!,
+                            Arguments = server.Transport.Arguments ?? [],
+                            EnvironmentVariables = server.Transport.Environment!
+                        }, _loggerFactory);
+                        transport = stdioTransport;
+                        client = await McpClient.CreateAsync(stdioTransport, loggerFactory: _loggerFactory, cancellationToken: ct);
+                        break;
 
-                case TransportType.Http:
-                    var httpOptions = new HttpClientTransportOptions
-                    {
-                        Endpoint = new Uri(server.Transport.Url!),
-                        Name = server.Name,
-                        AdditionalHeaders = TransportSecrets.ResolveHeaders(server.Transport)
-                    };
-                    if (server.Transport.ConnectionTimeout is { } connectionTimeout)
-                        httpOptions.ConnectionTimeout = connectionTimeout;
-                    var httpTransport = new HttpClientTransport(httpOptions, _loggerFactory);
-                    transport = httpTransport;
-                    client = await McpClient.CreateAsync(httpTransport, loggerFactory: _loggerFactory, cancellationToken: ct);
-                    break;
+                    case TransportType.Http:
+                        var httpOptions = new HttpClientTransportOptions
+                        {
+                            Endpoint = new Uri(server.Transport.Url!),
+                            Name = server.Name,
+                            AdditionalHeaders = TransportSecrets.ResolveHeaders(server.Transport)
+                        };
+                        if (server.Transport.ConnectionTimeout is { } connectionTimeout)
+                            httpOptions.ConnectionTimeout = connectionTimeout;
+                        var httpTransport = new HttpClientTransport(httpOptions, _loggerFactory);
+                        transport = httpTransport;
+                        client = await McpClient.CreateAsync(httpTransport, loggerFactory: _loggerFactory, cancellationToken: ct);
+                        break;
 
-                default:
-                    throw new InvalidTransportConfigException($"Unsupported transport: {server.Transport.Type}");
+                    default:
+                        throw new InvalidTransportConfigException($"Unsupported transport: {server.Transport.Type}");
+                }
             }
         }
         catch (Exception ex) when (ex is not AggregatorException)
