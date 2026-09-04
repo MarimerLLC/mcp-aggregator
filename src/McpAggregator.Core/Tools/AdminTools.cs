@@ -19,13 +19,13 @@ public class AdminTools
         [Description("Unique name for the server")] string name,
         [Description("Transport type: 'Stdio' or 'Http'")] string transportType,
         [Description("For Stdio: the command to run. For Http: the server URL.")] string endpoint,
-        [Description("Optional display name")] string? displayName,
-        [Description("Optional description")] string? description,
-        [Description("For Stdio: JSON array of command arguments")] string? arguments,
-        [Description("For Stdio: JSON object of environment variables")] string? environment,
-        [Description("For Http: JSON object of HTTP headers. Values may reference environment variables as ${VAR}, resolved at connect time.")] string? headers,
-        [Description("For Http: connection timeout in seconds")] int? connectionTimeoutSeconds,
-        CancellationToken ct)
+        [Description("Optional display name")] string? displayName = null,
+        [Description("Optional description")] string? description = null,
+        [Description("For Stdio: JSON array of command arguments")] string? arguments = null,
+        [Description("For Stdio: JSON object of environment variables")] string? environment = null,
+        [Description("For Http: JSON object of HTTP headers. Values may reference environment variables as ${VAR}, resolved at connect time.")] string? headers = null,
+        [Description("For Http: connection timeout in seconds")] int? connectionTimeoutSeconds = null,
+        CancellationToken ct = default)
     {
         var transport = new TransportConfig();
 
@@ -84,15 +84,15 @@ public class AdminTools
         ServerRegistry registry,
         ConnectionManager connectionManager,
         [Description("The name of the registered server")] string serverName,
-        [Description("Transport type: 'Stdio' or 'Http'. Required together with endpoint to replace the transport.")] string? transportType,
-        [Description("For Stdio: the command to run. For Http: the server URL. Required together with transportType.")] string? endpoint,
-        [Description("New display name")] string? displayName,
-        [Description("New description")] string? description,
-        [Description("For Stdio: JSON array of command arguments")] string? arguments,
-        [Description("For Stdio: JSON object of environment variables")] string? environment,
-        [Description("For Http: JSON object of HTTP headers. Values may reference environment variables as ${VAR}, resolved at connect time.")] string? headers,
-        [Description("For Http: connection timeout in seconds")] int? connectionTimeoutSeconds,
-        CancellationToken ct)
+        [Description("Transport type: 'Stdio' or 'Http'. Required together with endpoint to replace the transport.")] string? transportType = null,
+        [Description("For Stdio: the command to run. For Http: the server URL. Required together with transportType.")] string? endpoint = null,
+        [Description("New display name")] string? displayName = null,
+        [Description("New description")] string? description = null,
+        [Description("For Stdio: JSON array of command arguments")] string? arguments = null,
+        [Description("For Stdio: JSON object of environment variables")] string? environment = null,
+        [Description("For Http: JSON object of HTTP headers. Values may reference environment variables as ${VAR}, resolved at connect time.")] string? headers = null,
+        [Description("For Http: connection timeout in seconds")] int? connectionTimeoutSeconds = null,
+        CancellationToken ct = default)
     {
         await registry.EnsureLoadedAsync(ct);
 
