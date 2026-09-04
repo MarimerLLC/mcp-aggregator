@@ -1,5 +1,7 @@
 using System.Reflection;
+using McpAggregator.Core.Tools;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -29,6 +31,17 @@ public static class McpServerBuilderExtensions
                     Version = version,
                 };
                 mcpOpts.ServerInstructions = BuildInstructions(agg.SelfName, LoadSelfSkill(agg));
+            });
+
+        // Give the aggregator's own tools the same self-correcting argument help that
+        // ToolProxyHandler gives proxied downstream calls: without this, a binding failure reaches
+        // the caller as a bare "An error occurred invoking 'X'".
+        services.AddOptions<McpServerOptions>()
+            .Configure<ILoggerFactory>((mcpOpts, loggerFactory) =>
+            {
+                var logger = loggerFactory.CreateLogger(typeof(AggregatorToolErrorFilter));
+                mcpOpts.Filters.Request.CallToolFilters.Add(
+                    next => AggregatorToolErrorFilter.Create(next, logger));
             });
 
         return builder;

@@ -49,8 +49,8 @@ public class ConsumerTools
         ToolProxyHandler proxy,
         [Description("The name of the registered server")] string serverName,
         [Description("The name of the tool to invoke")] string toolName,
-        [Description("JSON object of arguments to pass to the tool")] string? arguments,
-        CancellationToken ct)
+        [Description("JSON object of arguments to pass to the tool")] string? arguments = null,
+        CancellationToken ct = default)
     {
         return await proxy.InvokeAsync(serverName, toolName, arguments, ct);
     }
@@ -61,8 +61,8 @@ public class ConsumerTools
         ConnectionManager connectionManager,
         [Description("The name of the registered server")] string serverName,
         [Description("The name of the prompt to retrieve")] string promptName,
-        [Description("JSON object of string argument values for the prompt template, or null if no arguments needed")] string? arguments,
-        CancellationToken ct)
+        [Description("JSON object of string argument values for the prompt template, or null if no arguments needed")] string? arguments = null,
+        CancellationToken ct = default)
     {
         IReadOnlyDictionary<string, object?>? args = null;
         if (!string.IsNullOrWhiteSpace(arguments))

@@ -20,6 +20,15 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     private readonly Task _runTask;
 
     public InMemoryMcpServer(string name, params McpServerTool[] tools)
+        : this(name, configureOptions: null, tools)
+    {
+    }
+
+    /// <param name="configureOptions">
+    /// Applied to the <see cref="McpServerOptions"/> before the server is created — lets a test
+    /// install request filters or other server-side behavior.
+    /// </param>
+    public InMemoryMcpServer(string name, Action<McpServerOptions>? configureOptions, params McpServerTool[] tools)
     {
         _serverTransport = new StreamServerTransport(
             _clientToServer.Reader.AsStream(),
@@ -35,6 +44,8 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
             ServerInfo = new Implementation { Name = name, Version = "1.0.0" },
             ToolCollection = toolCollection
         };
+
+        configureOptions?.Invoke(options);
 
         _server = McpServer.Create(_serverTransport, options);
         _runTask = _server.RunAsync(_cts.Token);
