@@ -167,14 +167,21 @@ parameter returns an error naming the parameter without contacting the downstrea
 
 | Mode | `tools/list` contains | Wrappers become callable when |
 |------|-----------------------|-------------------------------|
-| `Lazy` (default) | The aggregator's own tools only | `find_tools` or `get_service_details` activates them; the aggregator sends `notifications/tools/list_changed` |
+| `Lazy` (default) | The aggregator's own tools, plus whatever **this session** has activated | `find_tools` or `get_service_details` activates them for the calling session and the aggregator sends that session `notifications/tools/list_changed`; any wrapper is also callable by name whether or not it is listed |
 | `Eager` | Every tool of every enabled server | Always |
 
-Activation is process-wide, not per client session. `Lazy` is the default because Claude Desktop
-caps the total number of tools across all connected servers at roughly 44. The HTTP host ships
-with `Eager` in its `appsettings.json`: it runs MCP over **stateless** HTTP, where there is no
-session to deliver `list_changed` to, so a lazily activated wrapper would be invisible until the
-client re-lists on its own. On stdio (Claude Desktop, Claude Code) the notification is delivered.
+Lazy activation is **per session**. The point of the mode is to keep tool descriptions out of
+context windows that did not ask for them, so one client's `find_tools` never enlarges another
+client's `tools/list`. A client that learned a name (from `find_tools`, a skill document, an
+earlier session) can call it directly; the aggregator resolves it by name and, from then on, lists
+it for that session. `Lazy` is the default because Claude Desktop caps the total number of tools
+across all connected servers at roughly 44.
+
+The HTTP host ships with `Eager` in its `appsettings.json`. It runs MCP over **stateless** HTTP,
+where every request is its own session: in `Lazy` mode wrappers are never listed there (nothing
+carries over between requests) and are only callable by name, which suits programmatic clients but
+not hosts that refuse to call a tool they have not listed. Switch it to `Lazy` if your HTTP
+clients call by name and you want the smallest possible `tools/list`.
 
 Wrapper names track the registered server name. Unregistering and re-registering a server under a
 new name removes the old wrappers and adds new ones, and the server's immutable `id` (shown in

@@ -1,9 +1,11 @@
 using System.Reflection;
+using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Tools;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -79,6 +81,55 @@ public static class McpServerBuilderExtensions
         });
         services.AddSingleton<WrapperToolCatalog>();
         services.AddHostedService<WrapperSyncHostedService>();
+
+        // Lazy mode is per session. The SDK lists the shared collection and then appends whatever
+        // this handler returns, so each session sees only the wrappers it activated; and a call to
+        // a name the collection does not hold falls through to the second handler, which resolves
+        // any wrapper by name so a client that learned a name from find_tools can call it whether
+        // or not its host ever re-listed. Neither handler touches the shared collection.
+        builder.WithListToolsHandler((request, ct) =>
+        {
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+            var wrappers = catalog?.ActivatedFor(request.Server) ?? [];
+            return ValueTask.FromResult(new ListToolsResult
+            {
+                Tools = wrappers.Select(w => w.ProtocolTool).ToList()
+            });
+        });
+
+        builder.WithCallToolHandler(async (request, ct) =>
+        {
+            var name = request.Params?.Name;
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+
+            if (name is { Length: > 0 } && catalog is not null)
+            {
+                DownstreamToolWrapper? wrapper;
+                try
+                {
+                    wrapper = await catalog.ResolveAsync(name, ct);
+                }
+                catch (AggregatorException ex) when (!ct.IsCancellationRequested)
+                {
+                    // Registered and enabled, but unreachable: a result the caller can act on.
+                    return new CallToolResult
+                    {
+                        IsError = true,
+                        Content = [new TextContentBlock { Text = ex.Message }]
+                    };
+                }
+
+                if (wrapper is not null)
+                {
+                    // The session is using it, so list it for that session from now on.
+                    await catalog.ActivateAsync(request.Server, [wrapper], ct);
+                    return await wrapper.InvokeAsync(request, ct);
+                }
+            }
+
+            // Same fault the SDK raises; AggregatorToolErrorFilter turns it into a hint.
+            throw new McpProtocolException($"Unknown tool: '{name}'", McpErrorCode.InvalidParams);
+        });
 
         return builder;
     }

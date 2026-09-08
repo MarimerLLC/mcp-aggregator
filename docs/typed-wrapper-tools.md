@@ -66,9 +66,19 @@ returns schemas without activating leaves the model holding a name it cannot cal
 `invoke_tool` fallback with extra steps. So Lazy = "search, then activate", and `list_services`
 already carries the name-only catalog (`wrapperName` per tool) for browsing.
 
-Activation is **process-wide**, not per session. Everything the SDK offers is process-wide too:
-there is one `ToolCollection` per `McpServerOptions` instance, and both hosts share the
-`IOptions<McpServerOptions>` singleton with the server.
+Activation is **per session**. The reason Lazy exists is to keep tool descriptions out of context
+windows that did not ask for them, and that goal is defeated if one client's `find_tools` grows
+every later client's `tools/list`. So in Lazy mode the process-wide `ToolCollection` is never
+touched; instead the catalog keeps an activation set per session, a `ListToolsHandler` appends
+that session's wrappers to the SDK's list (the SDK merges collection tools with handler results),
+and a `CallToolHandler` fallback dispatches any wrapper **by name** whether or not it is listed,
+activating it for that session as a side effect. The catalog sends that session
+`tools/list_changed` itself, since the collection never changes.
+
+The session key is `McpServer.SessionId` when the transport has one (stateful HTTP), otherwise the
+`McpServerOptions` instance: one per stdio process, and one per request on stateless HTTP, which
+yields exactly "no memory between requests". (`request.Server` is a fresh
+`DestinationBoundMcpServer` facade per request in SDK 2.2.0 and cannot serve as a key.)
 
 Defaults: the stdio host keeps `Lazy` (Claude Desktop caps the total tool count at roughly 44
 across all servers; eager registration of a 55-tool inventory would blow that on its own). The
@@ -113,14 +123,15 @@ downstream is never called. Everything else is the shared proxy path, so a downs
 still carries the argument hint. `AggregatorToolErrorFilter` is unaffected by wrappers on the
 binding path (it only converts binding `ArgumentException`s, which wrappers never raise).
 
-The filter does gain a second job: a `tools/call` for a name the aggregator does not expose. With
-wrappers that is usually a **stale tool list** — the server was renamed (Q2/Q3), disabled, or in
-Lazy mode the wrapper was never activated. Instead of the SDK's bare `Unknown tool: 'x'` fault the
-caller gets an `isError` result from `WrapperToolCatalog.BuildUnknownToolHintAsync` that names the
-cause (unknown server with the registered names, disabled server, unknown tool with the server's
-real tool names) and the recovery (`find_tools`, refresh the tool list, `invoke_tool`). When the
-wrapper does exist, the hint activates it on the spot so a retry after a refresh succeeds. Covered
-by `DownstreamToolWrapperTests`, `ListChangedEndToEndTests` and `AggregatorToolErrorFilterTests`.
+A `tools/call` for a `{server}__{tool}` name that is not in the shared collection reaches the
+aggregator's `CallToolHandler` fallback, which resolves the wrapper by name against the live index
+and runs it (so a stale-but-valid name, or a name learned from `find_tools` on stateless HTTP,
+just works). Only a name that cannot be resolved faults, and `AggregatorToolErrorFilter` turns
+that fault into an `isError` result from `WrapperToolCatalog.BuildUnknownToolHintAsync` naming the
+cause — unknown server with the registered names (the rename case, Q2/Q3), disabled server,
+unknown tool with the server's real tool names, unreachable server — and the recovery. Covered by
+`DownstreamToolWrapperTests`, `ListChangedEndToEndTests`, `UnknownToolHintTests` and
+`AggregatorToolErrorFilterTests`.
 
 ### Q7 — Mutation → `ToolCollection` → `list_changed`
 
@@ -149,8 +160,11 @@ does not change and no notification is sent.
   clients that opened a `subscriptions/listen` stream asking for `toolsListChanged` (SEP-2575).
   The SDK client does not open one on its own.
 
-So on the HTTP host, Lazy activation is invisible to a client until it re-lists on its own, which
-is why that host defaults to `Eager`. The stdio host gets the broadcast.
+So on the stateless HTTP host, Lazy mode never lists a wrapper: each request is its own session,
+nothing carries over, and no `list_changed` can be delivered. Wrappers are still callable by name
+after `find_tools`, which suits programmatic clients (rockbot) but not hosts that refuse to call an
+unlisted tool. That is why the HTTP host defaults to `Eager`. The stdio host gets the per-session
+broadcast on activation.
 
 One more stateless-HTTP wrinkle, found during the manual check: the SDK builds a **fresh
 `McpServerOptions` per request** through `IOptionsFactory`, and its options setup runs

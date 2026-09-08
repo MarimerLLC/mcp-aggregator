@@ -112,28 +112,31 @@ public class UnknownToolHintTests
         => rig.Client.CallToolAsync(tool, args ?? new Dictionary<string, object?>(), cancellationToken: TestTimeout).AsTask();
 
     [TestMethod]
-    public async Task Lazy_WrapperNotYetActivated_ActivatesItAndTellsCallerToRefresh()
+    public async Task Lazy_UnlistedWrapper_IsDispatchedByName_AndThenListedForThatSession()
     {
-        // The caller learned the name (from a previous session, a skill doc, a colleague) and
-        // called it before find_tools activated it. The call must not fault: activate, explain.
+        // The caller learned the name (a previous session, a skill doc, a colleague) and calls it
+        // before anything activated it. It must simply work — and only this session's list grows.
         await using var rig = await BuildAsync(WrapperToolMode.Lazy);
-        Assert.IsFalse(rig.Catalog.IsActive("probe__echo"));
+        Assert.IsFalse(rig.Catalog.IsActive("probe__echo", rig.Aggregator.Server));
 
         var result = await CallAsync(rig, "probe__echo", new() { ["message"] = "hi" });
 
-        Assert.IsTrue(result.IsError ?? false);
-        var text = TextOf(result);
-        StringAssert.Contains(text, "exists on server 'probe'");
-        StringAssert.Contains(text, "has been activated");
-        StringAssert.Contains(text, "Refresh your tool list");
-        StringAssert.Contains(text, "invoke_tool(serverName: \"probe\", toolName: \"echo\"");
-        StringAssert.Contains(text, "\"required\":[\"message\"]", "The schema lets the caller retry without another lookup.");
-        Assert.IsTrue(rig.Catalog.IsActive("probe__echo"), "The wrapper must be callable after the hint.");
+        Assert.IsFalse(result.IsError ?? false, TextOf(result));
+        Assert.AreEqual("echo:hi", TextOf(result));
+        Assert.IsTrue(rig.Catalog.IsActive("probe__echo", rig.Aggregator.Server), "Using it lists it for this session.");
+        var tools = await rig.Client.ListToolsAsync(cancellationToken: TestTimeout);
+        Assert.IsTrue(tools.Any(t => t.Name == "probe__echo"));
+    }
 
-        // And the retry the hint asks for succeeds.
-        var retry = await CallAsync(rig, "probe__echo", new() { ["message"] = "hi" });
-        Assert.IsFalse(retry.IsError ?? false, TextOf(retry));
-        Assert.AreEqual("echo:hi", TextOf(retry));
+    [TestMethod]
+    public async Task Lazy_UnlistedWrapper_MissingRequiredArgument_StillNamesTheParameter()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await CallAsync(rig, "probe__echo");
+
+        Assert.IsTrue(result.IsError ?? false);
+        StringAssert.Contains(TextOf(result), "Missing required parameter(s): [message]");
     }
 
     [TestMethod]
@@ -160,7 +163,7 @@ public class UnknownToolHintTests
         await rig.Catalog.SyncAsync(TestTimeout);
         await rig.Provider.GetRequiredService<ServerRegistry>().SetEnabledAsync(Downstream, false);
         await rig.Catalog.PendingSync;
-        Assert.IsFalse(rig.Catalog.IsActive("probe__echo"));
+        Assert.IsFalse(rig.Catalog.IsActive("probe__echo", rig.Aggregator.Server));
 
         var result = await CallAsync(rig, "probe__echo", new() { ["message"] = "hi" });
 

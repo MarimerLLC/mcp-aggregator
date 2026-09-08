@@ -14,11 +14,12 @@ public class ConsumerTools
     [Description("Search every registered downstream MCP server for tools matching a query (tool name, description, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, and makes them callable in your tool list. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
     public static async Task<string> FindTools(
         WrapperToolCatalog catalog,
+        McpServer server,
         [Description("What you are looking for, e.g. 'send email', 'docs search', or an exact tool name")] string query,
         [Description("Maximum number of matches to return (default 10)")] int? limit = null,
         CancellationToken ct = default)
     {
-        var result = await catalog.FindAsync(query, limit ?? 10, ct);
+        var result = await catalog.FindAsync(query, limit ?? 10, server, ct);
 
         var matches = result.Matches.Select(m => new
         {
@@ -28,13 +29,13 @@ public class ConsumerTools
             downstreamTool = m.Wrapper.ToolName,
             description = m.Detail.Description,
             inputSchema = m.Detail.InputSchema,
-            activated = catalog.IsActive(m.Wrapper.ProtocolTool.Name)
+            activated = catalog.IsActive(m.Wrapper.ProtocolTool.Name, server)
         }).ToList();
 
         var hint = matches.Count == 0
             ? "No downstream tool matched. Try different words, or call list_services to browse every server and its tools."
             : catalog.Mode == WrapperToolMode.Lazy
-                ? "Call the 'tool' name directly with the parameters in its inputSchema; these tools were just added to the aggregator's tool list (tools/list_changed was sent). If your client has not refreshed its tool list yet, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback."
+                ? "Call the 'tool' name directly with the parameters in its inputSchema. These tools are callable by name now, whether or not your client has refreshed its tool list (tools/list_changed was sent to this session). If your client refuses a tool it has not listed, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback."
                 : "Call the 'tool' name directly with the parameters in its inputSchema. If it is not in your tool list, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback.";
 
         return JsonSerializer.Serialize(new
@@ -59,10 +60,11 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "get_service_details")]
-    [Description("Get full tool schemas (including input parameters) and prompt templates for a specific registered MCP server, and make that server's typed '{server}__{tool}' tools callable in your tool list.")]
+    [Description("Get full tool schemas (including input parameters) and prompt templates for a specific registered MCP server, and add that server's typed '{server}__{tool}' tools to your tool list.")]
     public static async Task<string> GetServiceDetails(
         ToolIndex toolIndex,
         WrapperToolCatalog catalog,
+        McpServer server,
         [Description("The name of the registered server")] string serverName,
         CancellationToken ct)
     {
@@ -71,8 +73,8 @@ public class ConsumerTools
         if (catalog.Mode == WrapperToolMode.Lazy && details.Enabled)
         {
             // Drilling into a server is a strong signal the caller intends to use it, so expose
-            // its wrappers now rather than requiring a separate find_tools call.
-            await catalog.ActivateServerAsync(serverName, ct);
+            // its wrappers to this session now rather than requiring a separate find_tools call.
+            await catalog.ActivateServerAsync(server, serverName, ct);
         }
 
         return JsonSerializer.Serialize(details, JsonOptions);

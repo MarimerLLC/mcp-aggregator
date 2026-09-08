@@ -1,9 +1,11 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Models;
 using McpAggregator.Core.Tools;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Services;
@@ -18,12 +20,26 @@ public sealed record FindToolsResult(IReadOnlyList<FindToolsMatch> Matches, IRea
 
 /// <summary>
 /// Owns the typed wrapper tools (<c>{server}__{tool}</c>) the aggregator exposes for downstream
-/// tools and keeps <see cref="McpServerOptions.ToolCollection"/> in step with the registry and the
-/// tool index. The SDK's server subscribes to the collection's <c>Changed</c> event and sends
-/// <c>notifications/tools/list_changed</c> itself, so this class never talks to a session.
+/// tools.
 /// <para>
-/// Invariant: the catalog only ever adds or removes <see cref="DownstreamToolWrapper"/> instances.
-/// The aggregator's own attributed tools are never touched.
+/// In <see cref="WrapperToolMode.Eager"/> mode every wrapper of every enabled server is kept in
+/// the process-wide <see cref="McpServerOptions.ToolCollection"/>; the SDK server watches that
+/// collection and sends <c>notifications/tools/list_changed</c> itself.
+/// </para>
+/// <para>
+/// In <see cref="WrapperToolMode.Lazy"/> mode the shared collection is never touched. Activation
+/// is <b>per session</b>: <c>find_tools</c> and <c>get_service_details</c> record the wrappers for
+/// the calling <see cref="McpServer"/> only, the aggregator's <c>tools/list</c> handler appends
+/// that session's wrappers, and the <c>tools/call</c> fallback dispatches any wrapper by name
+/// whether or not it is listed. One client's discovery therefore never enlarges another client's
+/// tool list (which is the whole point of Lazy: not filling context windows with tools nobody
+/// asked for). A session with no memory between requests — stateless HTTP — simply never lists
+/// wrappers and relies on calling them by name.
+/// </para>
+/// <para>
+/// Invariant: the catalog only ever adds or removes <see cref="DownstreamToolWrapper"/> instances
+/// in the shared collection, and only in Eager mode. The aggregator's own attributed tools are
+/// never touched.
 /// </para>
 /// </summary>
 public sealed class WrapperToolCatalog
@@ -35,16 +51,76 @@ public sealed class WrapperToolCatalog
     private readonly IOptions<McpServerOptions> _mcpServerOptions;
     private readonly ILogger<WrapperToolCatalog> _logger;
 
-    // Last built wrapper set per server, keyed by server name.
+    // Last built wrapper set per server, keyed by server name. Source of instance reuse only;
+    // the index is the source of truth.
     private readonly ConcurrentDictionary<string, IReadOnlyList<DownstreamToolWrapper>> _built = new(StringComparer.OrdinalIgnoreCase);
 
-    // Lazy mode only: wrapper name → owning server name.
-    private readonly ConcurrentDictionary<string, string> _activated = new(StringComparer.Ordinal);
+    // Lazy mode: wrappers activated per session. The SDK hands tools a fresh McpServer facade per
+    // request, so the facade cannot be the key. What is stable: the session id where the transport
+    // has one (stateful HTTP), otherwise the McpServerOptions instance — one per stdio process, and
+    // one per request on stateless HTTP, which is exactly "no memory between requests". Id-keyed
+    // state is swept after ConnectionIdleTimeout; options-keyed state is weakly held.
+    private readonly ConcurrentDictionary<string, SessionActivation> _sessionsById = new(StringComparer.Ordinal);
+    private readonly ConditionalWeakTable<McpServerOptions, SessionActivation> _sessionsByOptions = new();
 
     private readonly ConcurrentDictionary<string, byte> _warnedLongNames = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
     private int _syncQueued;
     private volatile Task _scheduledSync = Task.CompletedTask;
+
+    private sealed class SessionActivation
+    {
+        public ConcurrentDictionary<string, DownstreamToolWrapper> Wrappers { get; } = new(StringComparer.Ordinal);
+        public DateTimeOffset LastTouched { get; set; } = DateTimeOffset.UtcNow;
+    }
+
+    private SessionActivation? TryGetSession(McpServer? session)
+    {
+        if (session is null)
+            return null;
+
+        if (session.SessionId is { Length: > 0 } id)
+            return _sessionsById.TryGetValue(id, out var byId) ? Touch(byId) : null;
+
+        return session.ServerOptions is { } options && _sessionsByOptions.TryGetValue(options, out var byOptions)
+            ? Touch(byOptions)
+            : null;
+    }
+
+    private SessionActivation? GetOrCreateSession(McpServer? session)
+    {
+        if (session is null)
+            return null;
+
+        if (session.SessionId is { Length: > 0 } id)
+        {
+            SweepIdleSessions();
+            return Touch(_sessionsById.GetOrAdd(id, _ => new SessionActivation()));
+        }
+
+        return session.ServerOptions is { } options
+            ? Touch(_sessionsByOptions.GetOrCreateValue(options))
+            : null;
+    }
+
+    private static SessionActivation Touch(SessionActivation state)
+    {
+        state.LastTouched = DateTimeOffset.UtcNow;
+        return state;
+    }
+
+    private void SweepIdleSessions()
+    {
+        var cutoff = DateTimeOffset.UtcNow - _options.ConnectionIdleTimeout;
+        foreach (var kvp in _sessionsById)
+        {
+            if (kvp.Value.LastTouched < cutoff)
+                _sessionsById.TryRemove(kvp.Key, out _);
+        }
+    }
+
+    private IEnumerable<SessionActivation> AllSessions()
+        => _sessionsById.Values.Concat(_sessionsByOptions.Select(kvp => kvp.Value));
 
     public WrapperToolCatalog(
         ServerRegistry registry,
@@ -67,7 +143,7 @@ public sealed class WrapperToolCatalog
 
     public WrapperToolMode Mode => _options.WrapperMode;
 
-    /// <summary>The wrapper tools currently exposed in the aggregator's tool list.</summary>
+    /// <summary>The wrapper tools currently in the shared, process-wide tool list (Eager mode).</summary>
     public IReadOnlyList<DownstreamToolWrapper> ActiveWrappers
         => ToolCollection.OfType<DownstreamToolWrapper>().ToList();
 
@@ -82,11 +158,13 @@ public sealed class WrapperToolCatalog
         get
         {
             var options = _mcpServerOptions.Value;
-            // AddAggregatorMcpServer post-configures this to non-null; the fallback only matters
-            // for a catalog constructed outside that wiring.
+            // AddAggregatorMcpServer pre-assigns this; the fallback only matters for a catalog
+            // constructed outside that wiring.
             return options.ToolCollection ??= [];
         }
     }
+
+    // ---------------------------------------------------------------- building
 
     /// <summary>
     /// Builds (or reuses) the wrapper set for one server from the tool index. A wrapper instance is
@@ -144,12 +222,33 @@ public sealed class WrapperToolCatalog
     }
 
     /// <summary>
+    /// Resolves a wrapper by its <c>{server}__{tool}</c> name against the live index, whether or
+    /// not it is listed anywhere. Null when the name does not parse, the server is unknown or
+    /// disabled, or the server has no such tool. Throws when the server is registered and enabled
+    /// but cannot be reached.
+    /// </summary>
+    public async Task<DownstreamToolWrapper?> ResolveAsync(string wrapperName, CancellationToken ct = default)
+    {
+        if (!WrapperNaming.TryParse(wrapperName, out var serverName, out _))
+            return null;
+
+        await _registry.EnsureLoadedAsync(ct);
+        if (!_registry.TryGet(serverName, out var server) || server is null || !server.Enabled)
+            return null;
+
+        var wrappers = await GetWrappersAsync(server.Name, ct);
+        return wrappers.FirstOrDefault(w => string.Equals(w.ProtocolTool.Name, wrapperName, StringComparison.Ordinal));
+    }
+
+    // ---------------------------------------------------------------- search
+
+    /// <summary>
     /// Searches every enabled server's tools for <paramref name="query"/>. An exact tool or wrapper
     /// name match ranks first, then token hits on the tool name, wrapper name, description and
     /// server metadata. In <see cref="WrapperToolMode.Lazy"/> mode the returned matches are
-    /// activated into the tool list before this returns.
+    /// activated for <paramref name="session"/> before this returns.
     /// </summary>
-    public async Task<FindToolsResult> FindAsync(string query, int limit, CancellationToken ct = default)
+    public async Task<FindToolsResult> FindAsync(string query, int limit, McpServer? session, CancellationToken ct = default)
     {
         await _registry.EnsureLoadedAsync(ct);
 
@@ -196,38 +295,81 @@ public sealed class WrapperToolCatalog
             .Take(Math.Max(1, limit))
             .ToList();
 
-        if (Mode == WrapperToolMode.Lazy && top.Count > 0)
-            await ActivateAsync(top.Select(m => m.Wrapper), ct);
+        if (top.Count > 0)
+            await ActivateAsync(session, top.Select(m => m.Wrapper), ct);
 
         return new FindToolsResult(top, skipped);
     }
 
-    /// <summary>Marks the wrappers as activated (Lazy mode) and resyncs the tool collection.</summary>
-    public async Task ActivateAsync(IEnumerable<DownstreamToolWrapper> wrappers, CancellationToken ct = default)
-    {
-        foreach (var wrapper in wrappers)
-            _activated[wrapper.ProtocolTool.Name] = wrapper.ServerName;
-
-        await SyncAsync(ct);
-    }
-
-    /// <summary>Activates every wrapper of one server (Lazy mode) and resyncs the tool collection.</summary>
-    public async Task ActivateServerAsync(string serverName, CancellationToken ct = default)
-    {
-        var wrappers = await GetWrappersAsync(serverName, ct);
-        await ActivateAsync(wrappers, ct);
-    }
-
-    /// <summary>True when a wrapper with this name is currently in the tool list.</summary>
-    public bool IsActive(string wrapperName)
-        => ToolCollection.TryGetPrimitive(wrapperName, out var tool) && tool is DownstreamToolWrapper;
+    // ---------------------------------------------------------------- per-session activation (Lazy)
 
     /// <summary>
-    /// Explains a <c>tools/call</c> for a name the aggregator does not currently expose, so the
-    /// caller can self-correct instead of concluding the tool is broken. Distinguishes a server
-    /// that was renamed or removed, a disabled server, an unknown tool on a known server, and a
-    /// real wrapper that simply was not in the caller's tool list yet — in which case the wrapper
-    /// is activated so a retry (after a tool-list refresh) succeeds.
+    /// Lazy mode: makes the wrappers part of <paramref name="session"/>'s tool list and tells that
+    /// session the list changed. No-op in Eager mode (everything is already listed) and when there
+    /// is no session to remember it for.
+    /// </summary>
+    public async Task ActivateAsync(McpServer? session, IEnumerable<DownstreamToolWrapper> wrappers, CancellationToken ct = default)
+    {
+        if (Mode != WrapperToolMode.Lazy)
+            return;
+
+        var state = GetOrCreateSession(session);
+        if (state is null)
+            return;
+
+        var added = 0;
+        foreach (var wrapper in wrappers)
+        {
+            if (state.Wrappers.TryAdd(wrapper.ProtocolTool.Name, wrapper))
+                added++;
+            else
+                state.Wrappers[wrapper.ProtocolTool.Name] = wrapper; // refreshed instance
+        }
+
+        if (added == 0)
+            return;
+
+        _logger.LogInformation("Activated {Count} wrapper tool(s) for a session ({Total} active in it)", added, state.Wrappers.Count);
+
+        try
+        {
+            // The shared collection did not change, so the SDK will not announce anything; tell
+            // this one session ourselves. Delivered as a broadcast, which reaches pre-2026-07-28
+            // clients (every real host today); a 2026-07-28 client would need a subscriptions/listen
+            // stream and the SDK offers no public way to fan out into one from here.
+            await session!.SendNotificationAsync(NotificationMethods.ToolListChangedNotification, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not send tools/list_changed to the session");
+        }
+    }
+
+    /// <summary>Lazy mode: activates every wrapper of one server for <paramref name="session"/>.</summary>
+    public async Task ActivateServerAsync(McpServer? session, string serverName, CancellationToken ct = default)
+    {
+        var wrappers = await GetWrappersAsync(serverName, ct);
+        await ActivateAsync(session, wrappers, ct);
+    }
+
+    /// <summary>The wrappers activated for <paramref name="session"/> (Lazy mode); empty otherwise.</summary>
+    public IReadOnlyList<DownstreamToolWrapper> ActivatedFor(McpServer? session)
+        => TryGetSession(session) is { } state
+            ? state.Wrappers.Values.OrderBy(w => w.ProtocolTool.Name, StringComparer.Ordinal).ToList()
+            : [];
+
+    /// <summary>True when this wrapper name is in <paramref name="session"/>'s tool list right now.</summary>
+    public bool IsActive(string wrapperName, McpServer? session)
+        => (ToolCollection.TryGetPrimitive(wrapperName, out var tool) && tool is DownstreamToolWrapper)
+           || (TryGetSession(session) is { } state && state.Wrappers.ContainsKey(wrapperName));
+
+    // ---------------------------------------------------------------- unknown-tool hint
+
+    /// <summary>
+    /// Explains a <c>tools/call</c> for a name the aggregator could not dispatch, so the caller can
+    /// self-correct instead of concluding the tool is broken. Distinguishes a server that was
+    /// renamed or removed, a disabled server, an unknown tool on a known server, and a server that
+    /// exists but cannot be reached.
     /// </summary>
     public async Task<string> BuildUnknownToolHintAsync(string toolName, CancellationToken ct = default)
     {
@@ -260,7 +402,7 @@ public sealed class WrapperToolCatalog
         if (!server.Enabled)
         {
             return $"Tool '{toolName}' is not available: server '{server.Name}' is disabled. " +
-                   $"Call enable_service(serverName: \"{server.Name}\") to re-enable it, then refresh your tool list and retry.";
+                   $"Call enable_service(serverName: \"{server.Name}\") to re-enable it, then retry.";
         }
 
         IReadOnlyList<DownstreamToolWrapper> wrappers;
@@ -280,30 +422,25 @@ public sealed class WrapperToolCatalog
             var names = wrappers.Select(w => w.ProtocolTool.Name).Order(StringComparer.Ordinal);
             return $"Unknown tool '{toolName}': server '{server.Name}' has no tool '{downstreamTool}'. " +
                    $"Its tools: [{string.Join(", ", names)}]. " +
-                   $"Call get_service_details(serverName: \"{server.Name}\") for their input schemas, then refresh your tool list.";
+                   $"Call get_service_details(serverName: \"{server.Name}\") for their input schemas.";
         }
 
-        // The wrapper exists; the caller's tool list is simply behind. Make it callable now.
-        var activatedNow = !IsActive(wrapper.ProtocolTool.Name);
-        if (activatedNow)
-            await ActivateAsync([wrapper], ct);
-
-        var schema = wrapper.ProtocolTool.InputSchema.GetRawText();
-        var state = activatedNow
-            ? "It was not in the aggregator's tool list yet; it has been activated and tools/list_changed was sent."
-            : "It is in the aggregator's tool list now.";
-        return $"Tool '{toolName}' exists on server '{server.Name}' but was not in your tool list. {state} " +
-               "Refresh your tool list and retry, or call it now via " +
-               $"invoke_tool(serverName: \"{server.Name}\", toolName: \"{wrapper.ToolName}\", arguments: <JSON object as a string>). " +
-               $"Input schema: {schema}";
+        // Reachable only when the call could not be dispatched (no catalog-aware handler on this
+        // server). The tool exists; say so and give the generic route.
+        return $"Tool '{toolName}' exists on server '{server.Name}' but could not be dispatched by this endpoint. " +
+               $"Call it via invoke_tool(serverName: \"{server.Name}\", toolName: \"{wrapper.ToolName}\", arguments: <JSON object as a string>). " +
+               $"Input schema: {wrapper.ProtocolTool.InputSchema.GetRawText()}";
     }
 
+    // ---------------------------------------------------------------- Eager sync of the shared collection
+
     /// <summary>
-    /// Reconciles the tool collection with the desired wrapper set: every wrapper of every enabled
-    /// server in <see cref="WrapperToolMode.Eager"/> mode, or the activated wrappers that still
-    /// exist in <see cref="WrapperToolMode.Lazy"/> mode. Servers whose tools cannot be listed are
-    /// skipped and their previous wrappers removed. All adds and removes happen under one deferral
-    /// so the SDK sees a single <c>Changed</c> event per sync.
+    /// Reconciles the shared tool collection with the desired wrapper set: every wrapper of every
+    /// enabled server in <see cref="WrapperToolMode.Eager"/> mode, none in
+    /// <see cref="WrapperToolMode.Lazy"/> mode. Servers whose tools cannot be listed are skipped
+    /// and their previous wrappers removed. All adds and removes happen under one deferral so the
+    /// SDK sees a single <c>Changed</c> event per sync. Also drops per-session activations for
+    /// servers that are no longer enabled.
     /// </summary>
     public async Task SyncAsync(CancellationToken ct = default)
     {
@@ -316,36 +453,32 @@ public sealed class WrapperToolCatalog
 
             PruneState(enabledNames);
 
-            var serversToBuild = Mode == WrapperToolMode.Eager
-                ? enabled
-                : enabled.Where(s => _activated.Values.Contains(s.Name, StringComparer.OrdinalIgnoreCase)).ToList();
-
             var desired = new Dictionary<string, DownstreamToolWrapper>(StringComparer.Ordinal);
 
-            foreach (var server in serversToBuild)
+            if (Mode == WrapperToolMode.Eager)
             {
-                IReadOnlyList<DownstreamToolWrapper> wrappers;
-                try
+                foreach (var server in enabled)
                 {
-                    wrappers = await GetWrappersAsync(server.Name, ct);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogWarning(ex, "Skipping wrapper tools for '{Server}' (unavailable): {Message}", server.Name, ex.Message);
-                    _built.TryRemove(server.Name, out _);
-                    continue;
-                }
-
-                foreach (var wrapper in wrappers)
-                {
-                    if (Mode == WrapperToolMode.Lazy && !_activated.ContainsKey(wrapper.ProtocolTool.Name))
-                        continue;
-
-                    if (!desired.TryAdd(wrapper.ProtocolTool.Name, wrapper))
+                    IReadOnlyList<DownstreamToolWrapper> wrappers;
+                    try
                     {
-                        _logger.LogWarning(
-                            "Wrapper name '{Wrapper}' is claimed by more than one server; keeping the first",
-                            wrapper.ProtocolTool.Name);
+                        wrappers = await GetWrappersAsync(server.Name, ct);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Skipping wrapper tools for '{Server}' (unavailable): {Message}", server.Name, ex.Message);
+                        _built.TryRemove(server.Name, out _);
+                        continue;
+                    }
+
+                    foreach (var wrapper in wrappers)
+                    {
+                        if (!desired.TryAdd(wrapper.ProtocolTool.Name, wrapper))
+                        {
+                            _logger.LogWarning(
+                                "Wrapper name '{Wrapper}' is claimed by more than one server; keeping the first",
+                                wrapper.ProtocolTool.Name);
+                        }
                     }
                 }
             }
@@ -403,8 +536,11 @@ public sealed class WrapperToolCatalog
         foreach (var key in _built.Keys.Where(k => !enabledNames.Contains(k)).ToList())
             _built.TryRemove(key, out _);
 
-        foreach (var kvp in _activated.Where(kvp => !enabledNames.Contains(kvp.Value)).ToList())
-            _activated.TryRemove(kvp.Key, out _);
+        foreach (var state in AllSessions())
+        {
+            foreach (var kvp in state.Wrappers.Where(kvp => !enabledNames.Contains(kvp.Value.ServerName)).ToList())
+                state.Wrappers.TryRemove(kvp.Key, out _);
+        }
     }
 
     private void OnRegistryChanged()
@@ -426,8 +562,9 @@ public sealed class WrapperToolCatalog
     private void OnToolsChanged(string serverName)
     {
         // The index has already dropped or replaced its entry; the next GetWrappersAsync re-reads
-        // it and reuses any wrapper whose name and schema are unchanged. Keeping _built here is
-        // what makes a refresh_service after an unchanged downstream a no-op for the client.
+        // it and reuses any wrapper whose name and schema are unchanged. Session activations that
+        // hold a stale instance are refreshed on the session's next find_tools/get_service_details
+        // or call; the shared collection is reconciled here.
         ScheduleSync($"tools changed for '{serverName}'");
     }
 

@@ -76,6 +76,9 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     /// <summary>Transport a client (or <c>ConnectionManager.TransportFactoryOverride</c>) connects with.</summary>
     public IClientTransport ClientTransport { get; }
 
+    /// <summary>The server-side session object — what the aggregator keys per-session state by.</summary>
+    public McpServer Server => _server;
+
     public Task<McpClient> CreateClientAsync(CancellationToken ct = default)
         => McpClient.CreateAsync(ClientTransport, cancellationToken: ct);
 
@@ -84,16 +87,19 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await _cts.CancelAsync();
+        // Cancellation runs the server's registered callbacks inline; a session that never saw a
+        // client can throw from them. Teardown does not care.
+        try { await _cts.CancelAsync(); }
+        catch (Exception) { }
 
         // Completing both pipes unblocks the transport's pending reads so RunAsync can finish.
         await _clientToServer.Writer.CompleteAsync();
         await _serverToClient.Writer.CompleteAsync();
 
+        // A session that no client ever connected to can fault on shutdown; none of it matters
+        // to a test that is tearing down.
         try { await _runTask.WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch (OperationCanceledException) { }
-        catch (TimeoutException) { }
-        catch (IOException) { }
+        catch (Exception) { }
 
         await _server.DisposeAsync();
         await _serverTransport.DisposeAsync();

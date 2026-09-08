@@ -108,7 +108,7 @@ public class WrapperToolCatalogTests
     // ---------------------------------------------------------------- lazy
 
     [TestMethod]
-    public async Task Lazy_Sync_LeavesCollectionEmptyUntilActivation()
+    public async Task Lazy_Sync_LeavesTheSharedCollectionEmpty()
     {
         await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
 
@@ -120,29 +120,89 @@ public class WrapperToolCatalogTests
     }
 
     [TestMethod]
-    public async Task Lazy_FindAsync_ActivatesMatches()
+    public async Task Lazy_FindAsync_ActivatesMatchesForTheCallingSessionOnly()
     {
+        // The point of Lazy: one client's discovery must not enlarge anyone else's tool list.
         await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
+        await using var sessionA = harness.NewSession();
+        await using var sessionB = harness.NewSession();
 
-        var result = await harness.Catalog.FindAsync("list files", 10, TestTimeout);
+        var result = await harness.Catalog.FindAsync("list files", 10, sessionA.Server, TestTimeout);
 
         Assert.AreEqual(2, result.Matches.Count);
         CollectionAssert.AreEqual(
             new[] { "onedrive-marimer__list_files", "onedrive-personal__list_files" },
-            harness.WrapperNames);
-        Assert.IsTrue(result.Matches.All(m => harness.Catalog.IsActive(m.Wrapper.ProtocolTool.Name)));
+            harness.Catalog.ActivatedFor(sessionA.Server).Select(w => w.ProtocolTool.Name).ToList());
+        Assert.AreEqual(0, harness.Catalog.ActivatedFor(sessionB.Server).Count, "Another session must see nothing.");
+        Assert.AreEqual(0, harness.WrapperNames.Count, "The shared collection must stay untouched in Lazy mode.");
+        Assert.IsTrue(result.Matches.All(m => harness.Catalog.IsActive(m.Wrapper.ProtocolTool.Name, sessionA.Server)));
+        Assert.IsFalse(result.Matches.Any(m => harness.Catalog.IsActive(m.Wrapper.ProtocolTool.Name, sessionB.Server)));
     }
 
     [TestMethod]
-    public async Task Lazy_ActivateServerAsync_ExposesEveryToolOfThatServerOnly()
+    public async Task Lazy_FindAsync_WithoutASession_ActivatesNothing()
+    {
+        // Stateless HTTP has no session to remember for; find_tools still answers, nothing sticks.
+        await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
+
+        var result = await harness.Catalog.FindAsync("list files", 10, session: null, TestTimeout);
+
+        Assert.AreEqual(2, result.Matches.Count);
+        Assert.AreEqual(0, harness.WrapperNames.Count);
+    }
+
+    [TestMethod]
+    public async Task Lazy_ActivateServerAsync_ExposesEveryToolOfThatServerOnly_ToThatSession()
     {
         await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Lazy,
             ("docs", [Tool(SearchDocs, "search_docs"), Tool(FetchPage, "fetch_page")]),
             ("files", [Tool(ListFiles, "list_files")]));
+        await using var session = harness.NewSession();
 
-        await harness.Catalog.ActivateServerAsync("docs", TestTimeout);
+        await harness.Catalog.ActivateServerAsync(session.Server, "docs", TestTimeout);
 
-        CollectionAssert.AreEqual(new[] { "docs__fetch_page", "docs__search_docs" }, harness.WrapperNames);
+        CollectionAssert.AreEqual(new[] { "docs__fetch_page", "docs__search_docs" },
+            harness.Catalog.ActivatedFor(session.Server).Select(w => w.ProtocolTool.Name).ToList());
+        Assert.AreEqual(0, harness.WrapperNames.Count);
+    }
+
+    [TestMethod]
+    public async Task Eager_ActivateAsync_IsANoOp()
+    {
+        // Everything is already listed process-wide; per-session state has no meaning.
+        await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Eager);
+        await using var session = harness.NewSession();
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        await harness.Catalog.ActivateServerAsync(session.Server, "onedrive-marimer", TestTimeout);
+
+        Assert.AreEqual(0, harness.Catalog.ActivatedFor(session.Server).Count);
+        Assert.IsTrue(harness.Catalog.IsActive("onedrive-marimer__list_files", session.Server), "Listed via the shared collection.");
+    }
+
+    [TestMethod]
+    public async Task ResolveAsync_FindsAWrapperByNameWhetherOrNotItIsListed()
+    {
+        await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
+
+        var wrapper = await harness.Catalog.ResolveAsync("onedrive-personal__list_files", TestTimeout);
+
+        Assert.IsNotNull(wrapper);
+        Assert.AreEqual("onedrive-personal", wrapper.ServerName);
+        Assert.AreEqual("list_files", wrapper.ToolName);
+        Assert.AreEqual(0, harness.WrapperNames.Count, "Resolving must not list anything.");
+    }
+
+    [TestMethod]
+    public async Task ResolveAsync_ReturnsNullForUnknownDisabledOrMissing()
+    {
+        await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
+        await harness.Registry.SetEnabledAsync("onedrive-personal", false);
+
+        Assert.IsNull(await harness.Catalog.ResolveAsync("not-a-wrapper", TestTimeout));
+        Assert.IsNull(await harness.Catalog.ResolveAsync("ghost__list_files", TestTimeout));
+        Assert.IsNull(await harness.Catalog.ResolveAsync("onedrive-personal__list_files", TestTimeout), "Disabled server.");
+        Assert.IsNull(await harness.Catalog.ResolveAsync("onedrive-marimer__send_email", TestTimeout), "No such tool.");
     }
 
     // ---------------------------------------------------------------- find_tools ranking
@@ -153,7 +213,7 @@ public class WrapperToolCatalogTests
         await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Eager,
             ("docs", [Tool(SearchDocs, "search_docs"), Tool(FetchPage, "fetch_page")]));
 
-        var result = await harness.Catalog.FindAsync("search_docs", 10, TestTimeout);
+        var result = await harness.Catalog.FindAsync("search_docs", 10, session: null, TestTimeout);
 
         Assert.AreEqual("docs__search_docs", result.Matches[0].Wrapper.ProtocolTool.Name);
         Assert.IsTrue(result.Matches[0].Score >= 1000);
@@ -165,7 +225,7 @@ public class WrapperToolCatalogTests
         await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Eager,
             ("docs", [Tool(SearchDocs, "search_docs"), Tool(FetchPage, "fetch_page")]));
 
-        var result = await harness.Catalog.FindAsync("docs__fetch_page", 10, TestTimeout);
+        var result = await harness.Catalog.FindAsync("docs__fetch_page", 10, session: null, TestTimeout);
 
         Assert.AreEqual("docs__fetch_page", result.Matches[0].Wrapper.ProtocolTool.Name);
     }
@@ -176,7 +236,7 @@ public class WrapperToolCatalogTests
         await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Eager,
             ("docs", [Tool(SearchDocs, "search_docs"), Tool(FetchPage, "fetch_page")]));
 
-        var result = await harness.Catalog.FindAsync("documentation page url", 10, TestTimeout);
+        var result = await harness.Catalog.FindAsync("documentation page url", 10, session: null, TestTimeout);
 
         Assert.AreEqual("docs__fetch_page", result.Matches[0].Wrapper.ProtocolTool.Name);
         Assert.IsNotNull(result.Matches[0].Detail.InputSchema, "Matches must carry the schema so the caller can call the tool directly.");
@@ -187,10 +247,10 @@ public class WrapperToolCatalogTests
     {
         await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Eager);
 
-        var limited = await harness.Catalog.FindAsync("list files", 1, TestTimeout);
+        var limited = await harness.Catalog.FindAsync("list files", 1, session: null, TestTimeout);
         Assert.AreEqual(1, limited.Matches.Count);
 
-        var none = await harness.Catalog.FindAsync("send email", 10, TestTimeout);
+        var none = await harness.Catalog.FindAsync("send email", 10, session: null, TestTimeout);
         Assert.AreEqual(0, none.Matches.Count);
     }
 
@@ -200,7 +260,7 @@ public class WrapperToolCatalogTests
         await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Eager);
         await harness.Registry.SetEnabledAsync("onedrive-personal", false);
 
-        var result = await harness.Catalog.FindAsync("list files", 10, TestTimeout);
+        var result = await harness.Catalog.FindAsync("list files", 10, session: null, TestTimeout);
 
         Assert.AreEqual(1, result.Matches.Count);
         Assert.AreEqual("onedrive-marimer", result.Matches[0].Server.Name);
@@ -248,16 +308,32 @@ public class WrapperToolCatalogTests
     }
 
     [TestMethod]
-    public async Task Lazy_UnregisterServer_DropsItsActivation()
+    public async Task Lazy_UnregisterServer_DropsItsSessionActivations()
     {
         await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
-        await harness.Catalog.FindAsync("list files", 10, TestTimeout);
-        Assert.AreEqual(2, harness.WrapperNames.Count);
+        await using var session = harness.NewSession();
+        await harness.Catalog.FindAsync("list files", 10, session.Server, TestTimeout);
+        Assert.AreEqual(2, harness.Catalog.ActivatedFor(session.Server).Count);
 
         await harness.Registry.UnregisterAsync("onedrive-marimer");
         await harness.Catalog.PendingSync;
 
-        CollectionAssert.AreEqual(new[] { "onedrive-personal__list_files" }, harness.WrapperNames);
+        CollectionAssert.AreEqual(new[] { "onedrive-personal__list_files" },
+            harness.Catalog.ActivatedFor(session.Server).Select(w => w.ProtocolTool.Name).ToList());
+    }
+
+    [TestMethod]
+    public async Task Lazy_DisableServer_DropsItsSessionActivations()
+    {
+        await using var harness = await TwoOneDriveServersAsync(WrapperToolMode.Lazy);
+        await using var session = harness.NewSession();
+        await harness.Catalog.FindAsync("list files", 10, session.Server, TestTimeout);
+
+        await harness.Registry.SetEnabledAsync("onedrive-personal", false);
+        await harness.Catalog.PendingSync;
+
+        CollectionAssert.AreEqual(new[] { "onedrive-marimer__list_files" },
+            harness.Catalog.ActivatedFor(session.Server).Select(w => w.ProtocolTool.Name).ToList());
     }
 
     // ---------------------------------------------------------------- index events

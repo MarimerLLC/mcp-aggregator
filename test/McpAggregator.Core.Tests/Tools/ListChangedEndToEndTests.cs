@@ -264,7 +264,7 @@ public class ListChangedEndToEndTests
             cancellationToken: CancellationToken.None).AsTask();
         await acknowledged.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        await rig.Catalog.ActivateServerAsync(Downstream, TestTimeout);
+        await rig.Catalog.ActivateServerAsync(rig.Aggregator.Server, Downstream, TestTimeout);
 
         await listChanged.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var tools = await client.ListToolsAsync(cancellationToken: TestTimeout);
@@ -299,6 +299,70 @@ public class ListChangedEndToEndTests
     }
 
     [TestMethod]
+    public async Task Lazy_ActivationIsPerSession_AnotherClientSeesNothing()
+    {
+        // The requirement behind Lazy mode: a client's context window only carries the tools that
+        // client asked about. Two clients on the same aggregator process; A discovers, B must not
+        // see the result — but B can still call by name, and only then does B's own list grow.
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+        var (clientA, listChangedA) = await ConnectAsync(rig);
+
+        // A second session the way the SDK makes one: its own options instance over the shared
+        // collection (IOptionsFactory is what stateless HTTP uses per request).
+        var optionsB = rig.Provider.GetRequiredService<IOptionsFactory<McpServerOptions>>().Create(Options.DefaultName);
+        await using var sessionB = InMemoryMcpServer.Host("aggregator-b", optionsB, rig.Provider);
+        var listChangedB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clientB = await sessionB.CreateClientAsync(new McpClientOptions
+        {
+            ProtocolVersion = "2025-06-18",
+            Handlers = new McpClientHandlers
+            {
+                NotificationHandlers =
+                [
+                    new KeyValuePair<string, Func<JsonRpcNotification, CancellationToken, ValueTask>>(
+                        NotificationMethods.ToolListChangedNotification,
+                        (_, _) => { listChangedB.TrySetResult(); return ValueTask.CompletedTask; })
+                ]
+            }
+        }, TestTimeout);
+
+        var found = await clientA.CallToolAsync("find_tools",
+            new Dictionary<string, object?> { ["query"] = "echo" }, cancellationToken: TestTimeout);
+        Assert.IsFalse(found.IsError ?? false, TextOf(found));
+        await listChangedA.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var toolsA = await clientA.ListToolsAsync(cancellationToken: TestTimeout);
+        var toolsB = await clientB.ListToolsAsync(cancellationToken: TestTimeout);
+        Assert.IsTrue(toolsA.Any(t => t.Name == "probe__echo"), "The discovering client lists the wrapper.");
+        Assert.IsFalse(toolsB.Any(t => t.Name == "probe__echo"), "Another client's list must not grow because of A.");
+        Assert.IsFalse(listChangedB.Task.IsCompleted, "B was not told anything changed, because nothing did for B.");
+
+        // B learned the name some other way (a skill doc, a colleague) and calls it: dispatched by
+        // name, and from then on part of B's list.
+        var result = await clientB.CallToolAsync("probe__echo",
+            new Dictionary<string, object?> { ["message"] = "from B" }, cancellationToken: TestTimeout);
+        Assert.IsFalse(result.IsError ?? false, TextOf(result));
+        Assert.AreEqual("echo:from B", TextOf(result));
+
+        await listChangedB.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var toolsBAfter = await clientB.ListToolsAsync(cancellationToken: TestTimeout);
+        Assert.IsTrue(toolsBAfter.Any(t => t.Name == "probe__echo"));
+    }
+
+    [TestMethod]
+    public async Task Lazy_SharedCollectionIsNeverTouched()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+        var (client, _) = await ConnectAsync(rig);
+
+        await client.CallToolAsync("find_tools", new Dictionary<string, object?> { ["query"] = "echo" }, cancellationToken: TestTimeout);
+        await client.CallToolAsync("probe__echo", new Dictionary<string, object?> { ["message"] = "x" }, cancellationToken: TestTimeout);
+
+        var shared = rig.Provider.GetRequiredService<IOptions<McpServerOptions>>().Value.ToolCollection!;
+        Assert.IsFalse(shared.Any(t => t is DownstreamToolWrapper), "Lazy mode must keep the process-wide list minimal.");
+    }
+
+    [TestMethod]
     public async Task InvokeTool_StillWorksAsEscapeHatch()
     {
         await using var rig = await BuildAsync(WrapperToolMode.Lazy);
@@ -322,7 +386,7 @@ public class ListChangedEndToEndTests
         // Acceptance criterion: "wrapper with missing required argument (error names the parameter)".
         await using var rig = await BuildAsync(WrapperToolMode.Lazy);
         var (client, _) = await ConnectAsync(rig);
-        await rig.Catalog.ActivateServerAsync(Downstream, TestTimeout);
+        await rig.Catalog.ActivateServerAsync(rig.Aggregator.Server, Downstream, TestTimeout);
 
         var result = await client.CallToolAsync("probe__echo", cancellationToken: TestTimeout);
 

@@ -38,6 +38,26 @@ internal sealed class WrapperHarness : IAsyncDisposable
 
     public McpServerPrimitiveCollection<McpServerTool> ToolCollection => McpOptions.ToolCollection!;
 
+    private readonly List<InMemoryMcpServer> _sessions = [];
+
+    /// <summary>
+    /// A new aggregator session sharing the tool collection but with its own
+    /// <see cref="McpServerOptions"/> instance, as the SDK gives each stateless request and as a
+    /// stateful host does per session; that instance is what the catalog keys Lazy activation by
+    /// on transports without a session id. Disposed with the harness.
+    /// </summary>
+    public InMemoryMcpServer NewSession()
+    {
+        var options = new McpServerOptions
+        {
+            ServerInfo = McpOptions.ServerInfo,
+            ToolCollection = McpOptions.ToolCollection,
+        };
+        var session = InMemoryMcpServer.Host("aggregator", options);
+        lock (_spawnLock) _sessions.Add(session);
+        return session;
+    }
+
     public List<string> WrapperNames
         => ToolCollection.OfType<DownstreamToolWrapper>().Select(w => w.ProtocolTool.Name).Order(StringComparer.Ordinal).ToList();
 
@@ -125,7 +145,7 @@ internal sealed class WrapperHarness : IAsyncDisposable
         await Connections.DisposeAsync();
 
         List<InMemoryMcpServer> all;
-        lock (_spawnLock) all = [.. _spawned];
+        lock (_spawnLock) all = [.. _sessions, .. _spawned];
         foreach (var s in all)
             await s.DisposeAsync();
     }
