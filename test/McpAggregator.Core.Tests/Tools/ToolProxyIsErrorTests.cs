@@ -65,6 +65,7 @@ public class ToolProxyIsErrorTests
 
     private sealed record Harness(
         ToolProxyHandler Proxy,
+        ServerRegistry Registry,
         ConnectionManager Connections,
         InMemoryMcpServer Downstream) : IAsyncDisposable
     {
@@ -115,7 +116,7 @@ public class ToolProxyIsErrorTests
         var proxy = new ToolProxyHandler(connections, toolIndex, options,
             TestHelpers.NullLoggerOf<ToolProxyHandler>());
 
-        return new Harness(proxy, connections, downstream);
+        return new Harness(proxy, registry, connections, downstream);
     }
 
     private static CancellationToken TestTimeout => new CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
@@ -227,9 +228,10 @@ public class ToolProxyIsErrorTests
         await using var harness = await CreateHarnessAsync(downstreamTool);
 
         var proxy = harness.Proxy;
+        var registry = harness.Registry;
         var invokeTool = McpServerTool.Create(
             (string serverName, string toolName, string? arguments, CancellationToken ct)
-                => ConsumerTools.InvokeTool(proxy, serverName, toolName, arguments, ct),
+                => ConsumerTools.InvokeTool(proxy, registry, serverName, toolName, arguments, ct),
             new McpServerToolCreateOptions { Name = "invoke_tool" });
 
         await using var aggregator = new InMemoryMcpServer("mcp-aggregator", invokeTool);

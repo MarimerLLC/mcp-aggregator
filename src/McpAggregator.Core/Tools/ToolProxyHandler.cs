@@ -151,7 +151,15 @@ public class ToolProxyHandler
                 ? string.Join(", ", tools.Select(t => t.Name).Order(StringComparer.Ordinal))
                 : "(none)";
 
-            return $"Unknown tool '{toolName}' on server '{serverName}'. " +
+            // A common slip once typed wrappers exist: passing the '{server}__{tool}' name as the
+            // downstream toolName. Say so, and name the downstream tool it maps to.
+            var wrapperSlip = WrapperNaming.TryParse(toolName, out var prefix, out var downstreamName)
+                && string.Equals(prefix, serverName, StringComparison.OrdinalIgnoreCase)
+                && tools.Any(t => string.Equals(t.Name, downstreamName, StringComparison.Ordinal))
+                ? $"'{toolName}' is the typed tool name; call it directly as a tool, or pass toolName: \"{downstreamName}\" here. "
+                : string.Empty;
+
+            return $"Unknown tool '{toolName}' on server '{serverName}'. {wrapperSlip}" +
                    $"Available tools: [{available}]. " +
                    $"Re-invoke with one of those names, or call get_service_details(serverName: \"{serverName}\") " +
                    $"for their input schemas. Underlying error: {cause.Message}";

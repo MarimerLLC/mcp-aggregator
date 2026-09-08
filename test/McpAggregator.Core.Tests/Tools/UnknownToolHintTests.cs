@@ -160,6 +160,60 @@ public class UnknownToolHintTests
     }
 
     [TestMethod]
+    public async Task InvokeTool_UnknownServer_ListsTheRegisteredServers()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await CallAsync(rig, "invoke_tool", new()
+        {
+            ["serverName"] = "email-service",
+            ["toolName"] = "send_email",
+            ["arguments"] = "{}"
+        });
+
+        StringAssert.Contains(TextOf(result), "Registered servers: [probe]");
+    }
+
+    [TestMethod]
+    public async Task InvokeTool_WrapperNameAsToolName_IsExplained()
+    {
+        // gpt-4.1-nano did this in every send_email run on the old surface: it read wrapperName
+        // from list_services and passed it as toolName.
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await CallAsync(rig, "invoke_tool", new()
+        {
+            ["serverName"] = Downstream,
+            ["toolName"] = "probe__echo",
+            ["arguments"] = """{"message":"hi"}"""
+        });
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "'probe__echo' is the typed tool name");
+        StringAssert.Contains(text, "toolName: \"echo\"");
+    }
+
+    [TestMethod]
+    public async Task InvokeTool_ArgumentsNotJson_ReturnsAnActionableError()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await CallAsync(rig, "invoke_tool", new()
+        {
+            ["serverName"] = Downstream,
+            ["toolName"] = "echo",
+            ["arguments"] = "message=hi"
+        });
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "'arguments' must be the tool's argument object encoded as a JSON string");
+        StringAssert.Contains(text, "You sent: message=hi");
+        Assert.IsFalse(text.Contains("An error occurred invoking"), text);
+    }
+
+    [TestMethod]
     public async Task UnknownServer_NamesRegisteredServersAndFindTools()
     {
         // The rename case: calendar-mcp became adjutant; the caller still holds the old prefix.

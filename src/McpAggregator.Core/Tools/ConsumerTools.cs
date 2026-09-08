@@ -96,27 +96,45 @@ public class ConsumerTools
     [Description("Escape hatch: invoke a downstream tool through the generic proxy. Prefer the typed '{server}__{tool}' tools (see find_tools), which take the tool's real parameters. Use this only when the typed tool is not in your tool list. 'arguments' must be the tool's argument object encoded as a JSON string.")]
     public static async Task<CallToolResult> InvokeTool(
         ToolProxyHandler proxy,
-        [Description("The name of the registered server")] string serverName,
-        [Description("The name of the tool to invoke")] string toolName,
-        [Description("JSON object of arguments to pass to the tool")] string? arguments = null,
+        ServerRegistry registry,
+        [Description("The name of the registered server (from list_services), e.g. 'adjutant'")] string serverName,
+        [Description("The downstream tool's own name (from list_services or get_service_details), e.g. 'send_email' — not the typed '{server}__{tool}' name")] string toolName,
+        [Description("The tool's argument object encoded as a JSON string, e.g. \"{\\\"query\\\": \\\"...\\\"}\"")] string? arguments = null,
         CancellationToken ct = default)
     {
         try
         {
             return await proxy.InvokeAsync(serverName, toolName, arguments, ct);
         }
+        catch (ServerNotFoundException ex) when (!ct.IsCancellationRequested)
+        {
+            // A small model that skipped discovery guessed the name. Name the real ones so the
+            // retry needs no further round-trip.
+            await registry.EnsureLoadedAsync(ct);
+            var registered = registry.GetAll().Where(s => s.Enabled).Select(s => s.Name).Order(StringComparer.OrdinalIgnoreCase);
+            return ErrorResult($"{ex.Message} Registered servers: [{string.Join(", ", registered)}]. " +
+                               "Re-invoke with one of those as serverName, or call find_tools to locate the tool.");
+        }
         catch (AggregatorException ex) when (!ct.IsCancellationRequested)
         {
-            // "Server 'x' not found." / "is unavailable." / "timed out" are written for the caller.
-            // Thrown, the SDK would replace them with "An error occurred invoking 'invoke_tool'." —
-            // which is what sends a small model off guessing.
-            return new CallToolResult
-            {
-                IsError = true,
-                Content = [new TextContentBlock { Text = ex.Message }]
-            };
+            // "is unavailable." / "timed out" are written for the caller. Thrown, the SDK would
+            // replace them with "An error occurred invoking 'invoke_tool'." — which is what sends
+            // a small model off guessing.
+            return ErrorResult(ex.Message);
+        }
+        catch (JsonException ex) when (!ct.IsCancellationRequested)
+        {
+            return ErrorResult(
+                $"'arguments' must be the tool's argument object encoded as a JSON string, for example " +
+                $"\"{{\\\"query\\\": \\\"text\\\"}}\". You sent: {Truncate(arguments, 200)}. Parse error: {ex.Message}");
         }
     }
+
+    private static CallToolResult ErrorResult(string text)
+        => new() { IsError = true, Content = [new TextContentBlock { Text = text }] };
+
+    private static string Truncate(string? s, int max)
+        => string.IsNullOrEmpty(s) ? "(nothing)" : s.Length <= max ? s : s[..max] + "…";
 
     [McpServerTool(Name = "get_prompt")]
     [Description("Escape hatch: retrieve a rendered prompt from a downstream MCP server. Returns the prompt description and messages ready for use in a conversation. 'arguments' must be the prompt's argument object encoded as a JSON string.")]
