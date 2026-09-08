@@ -275,8 +275,12 @@ public class ListChangedEndToEndTests
     public async Task RefreshService_KeepsTheWrapper_AndStaysQuietWhenNothingChanged()
     {
         await using var rig = await BuildAsync(WrapperToolMode.Eager);
-        var (client, _) = await ConnectAsync(rig);
+
+        // Sync before the client connects: the SDK sends the list_changed for this initial sync
+        // asynchronously, and on a slow runner it can land after the counting handler below is
+        // registered, which is what made this test flaky on CI.
         await rig.Catalog.SyncAsync(TestTimeout);
+        var (client, _) = await ConnectAsync(rig);
         var before = rig.Catalog.ActiveWrappers.Single();
 
         var notifications = 0;
