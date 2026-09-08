@@ -184,6 +184,40 @@ entry, and a schema change is caught by the index fingerprint rather than the sk
 
 ## Measurements
 
+### How to run them
+
+`tools/McpAggregator.Measure` is a console harness that hosts the aggregator in-process over
+stub downstreams mimicking the issue's inventory (`adjutant`, `onedrive-marimer`,
+`onedrive-personal`, `microsoft-learn`; the stubs declare the real parameter shapes and validate
+what they receive) and drives it with a model under three conditions:
+
+| Condition | What the model sees |
+|---|---|
+| `eager` | `WrapperMode=Eager`: meta-tools plus every `{server}__{tool}` wrapper from the first turn |
+| `lazy` | `WrapperMode=Lazy`: meta-tools only; `find_tools` / `get_service_details` activate wrappers and the tool list is re-read each turn, as a host honoring `list_changed` would. A cold aggregator per run, because activation is process-wide |
+| `invoke_tool` | The pre-#39 surface: no `find_tools`, no wrappers, only `invoke_tool` with a stringified JSON argument object, and the old server instructions |
+
+Each run is a plain agent loop (no auto tool invocation) so every call is observed. Recorded per
+run: the first call that tried to reach a downstream and whether it hit the right tool with usable
+arguments (**first-call success**), whether the right tool was eventually reached (**completed**),
+steps and model turns, prompt and completion tokens, and per condition the `tools/list` byte size.
+
+```bash
+# any OpenAI-compatible server (OpenRouter, llama.cpp, Ollama, vLLM, LM Studio)
+dotnet run --project tools/McpAggregator.Measure --   --endpoint https://openrouter.ai/api/v1 --api-key $KEY --model qwen/qwen3-8b   --runs 10 --no-think --out results.json --md results.md
+
+dotnet run --project tools/McpAggregator.Measure -- --provider scripted   # validates the harness: 100% everywhere
+dotnet run --project tools/McpAggregator.Measure -- --dry-run             # tools/list size per condition, no model
+dotnet run --project tools/McpAggregator.Measure -- --help
+```
+
+`--no-think` turns model thinking off at the request level (`chat_template_kwargs.enable_thinking`
+for llama.cpp/vLLM; override with `--no-think-json '{"reasoning_effort":"none"}'` for
+OpenAI-style servers). `--provider azure` targets an Azure AI Foundry `.../models` endpoint.
+`--real-docs` swaps the Microsoft Learn stub for the real server.
+
+### Results
+
 Pending. The implementation ships with the `via` tag so these can be split by path. Fill in when
 a hosted low-tier model key (Azure AI Foundry or OpenRouter) is available.
 
