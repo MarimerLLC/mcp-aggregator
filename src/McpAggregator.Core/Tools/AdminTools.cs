@@ -83,6 +83,7 @@ public class AdminTools
     public static async Task<string> UpdateServer(
         ServerRegistry registry,
         ConnectionManager connectionManager,
+        ToolIndex toolIndex,
         [Description("The name of the registered server")] string serverName,
         [Description("Transport type: 'Stdio' or 'Http'. Required together with endpoint to replace the transport.")] string? transportType = null,
         [Description("For Stdio: the command to run. For Http: the server URL. Required together with transportType.")] string? endpoint = null,
@@ -133,8 +134,11 @@ public class AdminTools
 
         await registry.UpdateServerAsync(serverName, transport, displayName, description, ct);
 
-        // Drop any live connection so the next call reconnects with the new configuration.
+        // Drop any live connection so the next call reconnects with the new configuration, and the
+        // cached schemas so the typed wrapper tools are rebuilt from whatever the new transport serves.
         await connectionManager.DisconnectAsync(serverName);
+        if (transport is not null)
+            toolIndex.InvalidateCache(serverName);
 
         return $"Server '{serverName}' updated successfully.";
     }

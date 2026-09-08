@@ -109,6 +109,18 @@ public class ToolSchemaTests
     }
 
     [TestMethod]
+    public void FindTools_LimitIsOptional()
+    {
+        // The description says "(default 10)" — the schema must agree, and the DI-injected
+        // catalog must not leak into the parameters.
+        AssertOptional("find_tools", "limit");
+        AssertRequired("find_tools", "query");
+
+        var (properties, _) = GetSchema("find_tools");
+        CollectionAssert.DoesNotContain(properties, "catalog");
+    }
+
+    [TestMethod]
     public void GetPrompt_ArgumentsIsOptional()
     {
         // The description already says "or null if no arguments needed" — the schema must agree.

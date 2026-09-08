@@ -11,6 +11,14 @@ public class AggregatorOptions
     public TimeSpan ConnectionIdleTimeout { get; set; } = TimeSpan.FromMinutes(30);
     public TimeSpan DefaultToolTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// When downstream tools are exposed as typed wrapper tools in the aggregator's own tool list.
+    /// Defaults to <see cref="WrapperToolMode.Lazy"/> (stdio hosts such as Claude Desktop cap the
+    /// tool count); the HTTP host's appsettings sets <see cref="WrapperToolMode.Eager"/> because
+    /// stateless HTTP cannot deliver <c>tools/list_changed</c>.
+    /// </summary>
+    public WrapperToolMode WrapperMode { get; set; } = WrapperToolMode.Lazy;
+
     public string SelfName { get; set; } = "mcp-aggregator";
     public string SelfDescription { get; set; } = "MCP Aggregator gateway — proxies tool calls to multiple downstream MCP servers. IMPORTANT: call get_service_skill(serverName: \"mcp-aggregator\") first to get the full usage guide.";
     public string SelfApiDescription { get; set; } = "MCP Aggregator gateway — proxies tool calls to multiple downstream MCP servers.";

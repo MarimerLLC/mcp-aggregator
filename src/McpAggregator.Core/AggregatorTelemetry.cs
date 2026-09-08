@@ -10,11 +10,14 @@ public static class AggregatorTelemetry
     public static readonly ActivitySource ActivitySource = new(ServiceName);
     public static readonly Meter Meter = new(ServiceName);
 
-    /// <summary>Total tool invocations; tags: server_name, tool_name, result (success|error|timeout|cancelled)</summary>
+    /// <summary>
+    /// Total tool invocations; tags: server_name, tool_name, result (success|error|timeout|cancelled),
+    /// via (wrapper|invoke_tool — whether the call came through a typed wrapper tool or the generic proxy).
+    /// </summary>
     public static readonly Counter<long> ToolInvocations =
         Meter.CreateCounter<long>("mcp_tool_invocations_total", description: "Total tool invocations routed to downstream servers");
 
-    /// <summary>Tool invocation wall-clock duration; tags: server_name, tool_name</summary>
+    /// <summary>Tool invocation wall-clock duration; tags: server_name, tool_name, via</summary>
     public static readonly Histogram<double> ToolInvocationDuration =
         Meter.CreateHistogram<double>("mcp_tool_invocation_duration_seconds", unit: "s", description: "Wall-clock duration of tool invocations");
 

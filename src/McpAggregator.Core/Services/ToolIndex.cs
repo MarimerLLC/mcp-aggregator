@@ -3,6 +3,7 @@ using System.Text.Json;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
+using McpAggregator.Core.Tools;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
@@ -23,8 +24,16 @@ public class ToolIndex
     private readonly ConcurrentDictionary<string, CachedTools> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CachedPrompts> _promptCache = new(StringComparer.OrdinalIgnoreCase);
 
-    private record CachedTools(List<ToolDetail> Tools, DateTimeOffset FetchedAt);
+    private record CachedTools(List<ToolDetail> Tools, DateTimeOffset FetchedAt, string Fingerprint);
     private record CachedPrompts(List<PromptDetail> Prompts, DateTimeOffset FetchedAt);
+
+    /// <summary>
+    /// Raised with a server name whenever that server's indexed tool set may have changed: an
+    /// explicit <see cref="InvalidateCache"/>, or a TTL-driven re-fetch that came back with a
+    /// different set of tool names or schemas. <see cref="WrapperToolCatalog"/> listens to keep the
+    /// typed wrapper tools in step. Handlers run synchronously on the caller's thread.
+    /// </summary>
+    public event Action<string>? ToolsChanged;
 
     public ToolIndex(
         ServerRegistry registry,
@@ -80,6 +89,7 @@ public class ToolIndex
         {
             var index = new ServiceIndex
             {
+                Id = server.Id,
                 Name = server.Name,
                 DisplayName = server.DisplayName,
                 Description = server.AiSummary ?? server.Description,
@@ -101,7 +111,8 @@ public class ToolIndex
                     index.Tools = tools.Select(t => new ToolSummary
                     {
                         Name = t.Name,
-                        Description = t.Description
+                        Description = t.Description,
+                        WrapperName = t.WrapperName
                     }).ToList();
                 }
                 catch (Exception ex)
@@ -176,6 +187,7 @@ public class ToolIndex
 
         return new ServiceDetails
         {
+            Id = server.Id,
             Name = server.Name,
             DisplayName = server.DisplayName,
             Description = server.Description,
@@ -226,12 +238,55 @@ public class ToolIndex
             Description = t.Description,
             InputSchema = t.JsonSchema is { } schema
                 ? JsonSerializer.Deserialize<object>(schema.GetRawText())
-                : null
+                : null,
+            WrapperName = WrapperNaming.For(serverName, t.Name),
+            Protocol = t.ProtocolTool
         }).ToList();
 
-        _cache[serverName] = new CachedTools(tools, DateTimeOffset.UtcNow);
+        var fingerprint = ComputeToolFingerprint(tools);
+        var replaced = _cache.TryGetValue(serverName, out var previous)
+            && !string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal);
+
+        _cache[serverName] = new CachedTools(tools, DateTimeOffset.UtcNow, fingerprint);
         _logger.LogDebug("Cached {Count} tools for '{Server}'", tools.Count, serverName);
+
+        if (replaced)
+        {
+            // A TTL refresh found a different tool set (or schema) than the one the wrappers were
+            // built from; tell the catalog so the typed wrappers are rebuilt.
+            _logger.LogInformation("Tool set for '{Server}' changed on refresh", serverName);
+            RaiseToolsChanged(serverName);
+        }
+
         return tools;
+    }
+
+    /// <summary>
+    /// Name plus raw input-schema text per tool, in name order. Detects a renamed tool or a schema
+    /// change between refreshes; description-only changes do not count because they do not affect
+    /// how a wrapper is called.
+    /// </summary>
+    private static string ComputeToolFingerprint(IEnumerable<ToolDetail> tools)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var t in tools.OrderBy(t => t.Name, StringComparer.Ordinal))
+        {
+            sb.Append(t.Name).Append('\u0001');
+            sb.Append(t.Protocol?.InputSchema.GetRawText() ?? string.Empty).Append('\u0002');
+        }
+        return sb.ToString();
+    }
+
+    private void RaiseToolsChanged(string serverName)
+    {
+        try
+        {
+            ToolsChanged?.Invoke(serverName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "A ToolsChanged handler failed for '{Server}'", serverName);
+        }
     }
 
     public async Task<List<PromptDetail>> GetPromptsForServerAsync(string serverName, CancellationToken ct = default)
@@ -284,11 +339,15 @@ public class ToolIndex
         {
             _cache.TryRemove(serverName, out _);
             _promptCache.TryRemove(serverName, out _);
+            RaiseToolsChanged(serverName);
         }
         else
         {
+            var affected = _cache.Keys.ToList();
             _cache.Clear();
             _promptCache.Clear();
+            foreach (var name in affected)
+                RaiseToolsChanged(name);
         }
     }
 }

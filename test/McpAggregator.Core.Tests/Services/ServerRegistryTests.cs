@@ -464,6 +464,184 @@ public class ServerRegistryTests
         Assert.AreEqual("test-server", saved.Servers[0].Name);
     }
 
+    // --- Id (issue #39) ---
+
+    [TestMethod]
+    public async Task RegisterAsync_AssignsAnImmutableId()
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+        var server = TestHelpers.StdioServer();
+        Assert.IsNull(server.Id);
+
+        await registry.RegisterAsync(server);
+
+        Assert.IsNotNull(server.Id);
+        Assert.AreEqual(12, server.Id!.Length);
+        Assert.IsTrue(server.Id.All(c => char.IsAsciiHexDigitLower(c)), $"Id '{server.Id}' is not lowercase hex.");
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_KeepsACallerSuppliedId()
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+        var server = TestHelpers.StdioServer();
+        server.Id = "abc123abc123";
+
+        await registry.RegisterAsync(server);
+
+        Assert.AreEqual("abc123abc123", server.Id);
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_TwoServersGetDistinctIds()
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+        var a = TestHelpers.StdioServer("a");
+        var b = TestHelpers.StdioServer("b");
+
+        await registry.RegisterAsync(a);
+        await registry.RegisterAsync(b);
+
+        Assert.AreNotEqual(a.Id, b.Id);
+    }
+
+    [TestMethod]
+    public async Task UpdateServerAsync_PreservesId()
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+        var server = TestHelpers.HttpServer("api");
+        await registry.RegisterAsync(server);
+        var id = server.Id;
+
+        await registry.UpdateServerAsync("api", TestHelpers.HttpServer("api").Transport, "Renamed", "New description");
+
+        Assert.AreEqual(id, registry.Get("api").Id);
+    }
+
+    [TestMethod]
+    public async Task UnregisterAndReregister_ProducesADifferentId()
+    {
+        // A "rename" is unregister + register under a new name. The new registration is a new
+        // identity, so consumers that stored the old id can tell their wrapper names are stale.
+        var registry = CreateRegistry(EmptyPersistence());
+        var old = TestHelpers.StdioServer("calendar-mcp");
+        await registry.RegisterAsync(old);
+
+        await registry.UnregisterAsync("calendar-mcp");
+        var renamed = TestHelpers.StdioServer("adjutant");
+        await registry.RegisterAsync(renamed);
+
+        Assert.AreNotEqual(old.Id, renamed.Id);
+    }
+
+    [TestMethod]
+    public async Task EnsureLoadedAsync_BackfillsMissingIds_AndPersistsOnce()
+    {
+        var withId = TestHelpers.StdioServer("has-id");
+        withId.Id = "111111111111";
+        var withoutId = TestHelpers.StdioServer("no-id");
+
+        var saveCount = 0;
+        RegistryData? saved = null;
+        var expectations = new IRegistryPersistenceCreateExpectations();
+        expectations.Setups.LoadAsync(Arg.Any<CancellationToken>())
+            .ReturnValue(Task.FromResult(new RegistryData { Servers = [withId, withoutId] }));
+        expectations.Setups.SaveAsync(Arg.Any<RegistryData>(), Arg.Any<CancellationToken>())
+            .Callback((data, _) =>
+            {
+                Interlocked.Increment(ref saveCount);
+                saved = data;
+                return Task.CompletedTask;
+            });
+        var registry = CreateRegistry(expectations.Instance());
+
+        await registry.EnsureLoadedAsync();
+        await registry.EnsureLoadedAsync();
+
+        Assert.AreEqual("111111111111", registry.Get("has-id").Id, "An existing id must not be replaced.");
+        Assert.IsNotNull(registry.Get("no-id").Id, "A missing id must be backfilled.");
+        Assert.AreEqual(1, saveCount, "The backfill must be persisted exactly once.");
+        Assert.IsNotNull(saved!.Servers.Single(s => s.Name == "no-id").Id);
+    }
+
+    [TestMethod]
+    public async Task EnsureLoadedAsync_DoesNotPersistWhenEveryServerHasAnId()
+    {
+        var server = TestHelpers.StdioServer();
+        server.Id = "222222222222";
+        var saveCount = 0;
+        var expectations = new IRegistryPersistenceCreateExpectations();
+        expectations.Setups.LoadAsync(Arg.Any<CancellationToken>())
+            .ReturnValue(Task.FromResult(new RegistryData { Servers = [server] }));
+        expectations.Setups.SaveAsync(Arg.Any<RegistryData>(), Arg.Any<CancellationToken>())
+            .Callback((_, _) => { Interlocked.Increment(ref saveCount); return Task.CompletedTask; });
+        var registry = CreateRegistry(expectations.Instance());
+
+        await registry.EnsureLoadedAsync();
+
+        Assert.AreEqual(0, saveCount);
+    }
+
+    // --- Name validation (issue #39: names become wrapper-tool prefixes) ---
+
+    [DataTestMethod]
+    [DataRow("bad__name", DisplayName = "double underscore is the wrapper separator")]
+    [DataRow("has space", DisplayName = "space")]
+    [DataRow("-leading", DisplayName = "leading punctuation")]
+    [DataRow("slash/name", DisplayName = "slash")]
+    [DataRow("", DisplayName = "empty")]
+    [DataRow("mcp-aggregator", DisplayName = "the aggregator's own name")]
+    [DataRow("MCP-Aggregator", DisplayName = "the aggregator's own name, different case")]
+    public async Task RegisterAsync_RejectsInvalidServerNames(string name)
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+        var server = TestHelpers.StdioServer(name);
+
+        await Assert.ThrowsExactlyAsync<AggregatorException>(() => registry.RegisterAsync(server));
+        Assert.AreEqual(0, registry.GetAll().Count);
+    }
+
+    [DataTestMethod]
+    [DataRow("onedrive-marimer")]
+    [DataRow("adjutant")]
+    [DataRow("my.svc_1")]
+    [DataRow("A1")]
+    public async Task RegisterAsync_AcceptsValidServerNames(string name)
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+
+        await registry.RegisterAsync(TestHelpers.StdioServer(name));
+
+        Assert.AreEqual(name, registry.Get(name).Name);
+    }
+
+    [TestMethod]
+    public async Task RegisterAsync_NameTooLong_IsRejected()
+    {
+        var registry = CreateRegistry(EmptyPersistence());
+        var server = TestHelpers.StdioServer(new string('a', 65));
+
+        await Assert.ThrowsExactlyAsync<AggregatorException>(() => registry.RegisterAsync(server));
+    }
+
+    // --- SetEnabledAsync ---
+
+    [TestMethod]
+    public async Task SetEnabledAsync_FiresRegistryChanged()
+    {
+        // Enabling/disabling changes which wrapper tools exist, so the catalog must hear about it.
+        var registry = CreateRegistry(EmptyPersistence());
+        await registry.RegisterAsync(TestHelpers.StdioServer("svc"));
+        var fired = 0;
+        registry.RegistryChanged += () => fired++;
+
+        await registry.SetEnabledAsync("svc", false);
+        await registry.SetEnabledAsync("svc", true);
+
+        Assert.AreEqual(2, fired);
+        Assert.IsTrue(registry.Get("svc").Enabled);
+    }
+
     // --- UnregisterAsync ---
 
     [TestMethod]

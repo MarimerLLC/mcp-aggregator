@@ -2,6 +2,15 @@ namespace McpAggregator.Core.Models;
 
 public class RegisteredServer
 {
+    /// <summary>
+    /// Immutable identity assigned at registration (12 lowercase hex chars) and persisted in the
+    /// registry. Never user-editable and never derived from <see cref="Name"/>, so a consumer that
+    /// stores it alongside a wrapper tool name can detect an unregister-and-re-register rename
+    /// (issue #39). Nullable so registry files written before the field existed still load; the
+    /// registry backfills it on first load.
+    /// </summary>
+    public string? Id { get; set; }
+
     public required string Name { get; set; }
     public string? DisplayName { get; set; }
     public string? Description { get; set; }

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Services;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -9,8 +10,44 @@ namespace McpAggregator.Core.Tools;
 [McpServerToolType]
 public class ConsumerTools
 {
+    [McpServerTool(Name = "find_tools")]
+    [Description("Search every registered downstream MCP server for tools matching a query (tool name, description, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, and makes them callable in your tool list. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
+    public static async Task<string> FindTools(
+        WrapperToolCatalog catalog,
+        [Description("What you are looking for, e.g. 'send email', 'docs search', or an exact tool name")] string query,
+        [Description("Maximum number of matches to return (default 10)")] int? limit = null,
+        CancellationToken ct = default)
+    {
+        var result = await catalog.FindAsync(query, limit ?? 10, ct);
+
+        var matches = result.Matches.Select(m => new
+        {
+            tool = m.Wrapper.ProtocolTool.Name,
+            server = m.Server.Name,
+            serverId = m.Server.Id,
+            downstreamTool = m.Wrapper.ToolName,
+            description = m.Detail.Description,
+            inputSchema = m.Detail.InputSchema,
+            activated = catalog.IsActive(m.Wrapper.ProtocolTool.Name)
+        }).ToList();
+
+        var hint = matches.Count == 0
+            ? "No downstream tool matched. Try different words, or call list_services to browse every server and its tools."
+            : catalog.Mode == WrapperToolMode.Lazy
+                ? "Call the 'tool' name directly with the parameters in its inputSchema; these tools were just added to the aggregator's tool list (tools/list_changed was sent). If your client has not refreshed its tool list yet, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback."
+                : "Call the 'tool' name directly with the parameters in its inputSchema. If it is not in your tool list, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback.";
+
+        return JsonSerializer.Serialize(new
+        {
+            mode = catalog.Mode.ToString(),
+            matches,
+            skippedServers = result.SkippedServers,
+            hint
+        }, JsonOptions);
+    }
+
     [McpServerTool(Name = "list_services")]
-    [Description("List all registered MCP servers with a concise summary of each server's available tools.")]
+    [Description("List all registered MCP servers with a concise summary of each server's available tools. Each tool entry includes its typed wrapper name ('{server}__{tool}'); use find_tools or get_service_details to make those callable and get their schemas.")]
     public static async Task<string> ListServices(
         ServerRegistry registry,
         ToolIndex toolIndex,
@@ -22,13 +59,22 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "get_service_details")]
-    [Description("Get full tool schemas (including input parameters) for a specific registered MCP server.")]
+    [Description("Get full tool schemas (including input parameters) and prompt templates for a specific registered MCP server, and make that server's typed '{server}__{tool}' tools callable in your tool list.")]
     public static async Task<string> GetServiceDetails(
         ToolIndex toolIndex,
+        WrapperToolCatalog catalog,
         [Description("The name of the registered server")] string serverName,
         CancellationToken ct)
     {
         var details = await toolIndex.GetDetailsAsync(serverName, ct);
+
+        if (catalog.Mode == WrapperToolMode.Lazy && details.Enabled)
+        {
+            // Drilling into a server is a strong signal the caller intends to use it, so expose
+            // its wrappers now rather than requiring a separate find_tools call.
+            await catalog.ActivateServerAsync(serverName, ct);
+        }
+
         return JsonSerializer.Serialize(details, JsonOptions);
     }
 
@@ -44,7 +90,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "invoke_tool")]
-    [Description("Invoke a tool on a downstream MCP server by name. Returns the tool's response.")]
+    [Description("Escape hatch: invoke a downstream tool through the generic proxy. Prefer the typed '{server}__{tool}' tools (see find_tools), which take the tool's real parameters. Use this only when the typed tool is not in your tool list. 'arguments' must be the tool's argument object encoded as a JSON string.")]
     public static async Task<CallToolResult> InvokeTool(
         ToolProxyHandler proxy,
         [Description("The name of the registered server")] string serverName,
@@ -56,7 +102,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "get_prompt")]
-    [Description("Retrieve a rendered prompt from a downstream MCP server. Returns the prompt description and messages ready for use in a conversation.")]
+    [Description("Escape hatch: retrieve a rendered prompt from a downstream MCP server. Returns the prompt description and messages ready for use in a conversation. 'arguments' must be the prompt's argument object encoded as a JSON string.")]
     public static async Task<string> GetPrompt(
         ConnectionManager connectionManager,
         [Description("The name of the registered server")] string serverName,
@@ -79,7 +125,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "refresh_service")]
-    [Description("Drop the cached connection, ServerInfo, tool list, and prompt list for a registered MCP server so the next call re-fetches them from the downstream. Does NOT touch the skill document — that is admin-authored via update_skill. Use this after a downstream server has been upgraded or restarted.")]
+    [Description("Drop the cached connection, ServerInfo, tool list, and prompt list for a registered MCP server so the next call re-fetches them from the downstream, and rebuild its typed '{server}__{tool}' tools. Does NOT touch the skill document — that is admin-authored via update_skill. Use this after a downstream server has been upgraded or restarted.")]
     public static async Task<string> RefreshService(
         ToolIndex toolIndex,
         ConnectionManager connectionManager,

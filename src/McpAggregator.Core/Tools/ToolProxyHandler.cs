@@ -11,6 +11,18 @@ using ModelContextProtocol.Protocol;
 
 namespace McpAggregator.Core.Tools;
 
+/// <summary>
+/// Values of the <c>via</c> telemetry tag: which aggregator surface a downstream call came through.
+/// </summary>
+public static class InvocationPath
+{
+    /// <summary>The generic <c>invoke_tool</c> proxy (or the REST invoke endpoint).</summary>
+    public const string InvokeTool = "invoke_tool";
+
+    /// <summary>A typed <c>{server}__{tool}</c> wrapper tool.</summary>
+    public const string Wrapper = "wrapper";
+}
+
 public class ToolProxyHandler
 {
     private readonly ConnectionManager _connectionManager;
@@ -144,7 +156,7 @@ public class ToolProxyHandler
         }
     }
 
-    private static object? ConvertJsonElement(JsonElement element)
+    internal static object? ConvertJsonElement(JsonElement element)
     {
         return element.ValueKind switch
         {
@@ -162,6 +174,10 @@ public class ToolProxyHandler
         };
     }
 
+    /// <summary>
+    /// Generic proxy path used by <c>invoke_tool</c> and the REST invoke endpoint: parses the
+    /// stringified JSON argument object, then shares everything else with the typed-wrapper path.
+    /// </summary>
     public async Task<CallToolResult> InvokeAsync(
         string serverName,
         string toolName,
@@ -178,7 +194,27 @@ public class ToolProxyHandler
             }
         }
 
-        _logger.LogInformation("Invoking tool '{Tool}' on '{Server}'", toolName, serverName);
+        return await InvokeAsync(serverName, toolName, args, InvocationPath.InvokeTool, ct);
+    }
+
+    /// <summary>
+    /// The single downstream call path. Timeout, retry, telemetry, the argument-schema hint on a
+    /// downstream <c>isError</c>, the unknown-tool hint, and <c>isError</c> propagation all live
+    /// here so the generic <c>invoke_tool</c> proxy and the typed wrapper tools behave identically.
+    /// </summary>
+    /// <param name="via">
+    /// Which surface the call arrived through — one of the <see cref="InvocationPath"/> constants.
+    /// Recorded as the <c>via</c> tag on the invocation metric and activity so reliability can be
+    /// compared between the two paths.
+    /// </param>
+    public async Task<CallToolResult> InvokeAsync(
+        string serverName,
+        string toolName,
+        IReadOnlyDictionary<string, object?>? args,
+        string via,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation("Invoking tool '{Tool}' on '{Server}' via {Via}", toolName, serverName, via);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(_options.DefaultToolTimeout);
@@ -186,6 +222,7 @@ public class ToolProxyHandler
         using var activity = AggregatorTelemetry.ActivitySource.StartActivity("mcp.tool_invoke");
         activity?.SetTag("server_name", serverName);
         activity?.SetTag("tool_name", toolName);
+        activity?.SetTag("via", via);
 
         var sw = Stopwatch.StartNew();
         // Pessimistic default; success path overwrites before returning.
@@ -265,11 +302,12 @@ public class ToolProxyHandler
             {
                 { "server_name", serverName },
                 { "tool_name", toolName },
-                { "result", resultLabel }
+                { "result", resultLabel },
+                { "via", via }
             };
             AggregatorTelemetry.ToolInvocations.Add(1, tags);
             AggregatorTelemetry.ToolInvocationDuration.Record(sw.Elapsed.TotalSeconds,
-                new TagList { { "server_name", serverName }, { "tool_name", toolName } });
+                new TagList { { "server_name", serverName }, { "tool_name", toolName }, { "via", via } });
         }
     }
 }
