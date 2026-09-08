@@ -123,7 +123,48 @@ public class ToolProxyIsErrorTests
     private static string TextOf(CallToolResult result)
         => string.Join("\n", result.Content.OfType<TextContentBlock>().Select(b => b.Text));
 
+    // ---------------------------------------------------------------- doubles for type mismatches
+
+    [SysDescription("Sends an email. Never fails once bound.")]
+    private static CallToolResult SendEmail(
+        [SysDescription("Recipients")] string[] to,
+        [SysDescription("Subject")] string subject)
+        => new() { IsError = false, Content = [new TextContentBlock { Text = $"sent to {string.Join(",", to)}: {subject}" }] };
+
     // ---------------------------------------------------------------- tests
+
+    [TestMethod]
+    public async Task InvokeAsync_ValueOfWrongType_AttachesTheSchemaHint()
+    {
+        // The small-model slip from the measurement runs: every key present, but 'to' sent as a
+        // string where the schema wants an array. The downstream SDK sanitizes that to "An error
+        // occurred invoking 'send_email'.", which names nothing; the proxy must add the schema.
+        var tool = McpServerTool.Create(SendEmail, new McpServerToolCreateOptions { Name = "send_email" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "send_email", """{"to":"alice@example.com","subject":"Lunch"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "a supplied value did not match its declared type");
+        StringAssert.Contains(text, "\"type\":\"array\"", "The schema must be attached so the caller can fix the shape.");
+    }
+
+    [TestMethod]
+    public async Task InvokeAsync_SchemaValidArgumentsWithAGenuineToolError_GetsNoHint()
+    {
+        // Regression guard: a tool-side failure on well-formed arguments must not be re-described
+        // as an argument problem.
+        var tool = McpServerTool.Create(FailingListFiles, new McpServerToolCreateOptions { Name = "list_files" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "list_files", """{"folder":"/Documents"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        Assert.IsFalse(TextOf(result).Contains("Argument mismatch"), TextOf(result));
+    }
 
     [TestMethod]
     public async Task InvokeAsync_DownstreamReturnsIsError_PreservesFlag()

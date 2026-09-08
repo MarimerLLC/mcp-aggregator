@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using McpAggregator.Core.Configuration;
+using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Services;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -100,7 +101,21 @@ public class ConsumerTools
         [Description("JSON object of arguments to pass to the tool")] string? arguments = null,
         CancellationToken ct = default)
     {
-        return await proxy.InvokeAsync(serverName, toolName, arguments, ct);
+        try
+        {
+            return await proxy.InvokeAsync(serverName, toolName, arguments, ct);
+        }
+        catch (AggregatorException ex) when (!ct.IsCancellationRequested)
+        {
+            // "Server 'x' not found." / "is unavailable." / "timed out" are written for the caller.
+            // Thrown, the SDK would replace them with "An error occurred invoking 'invoke_tool'." —
+            // which is what sends a small model off guessing.
+            return new CallToolResult
+            {
+                IsError = true,
+                Content = [new TextContentBlock { Text = ex.Message }]
+            };
+        }
     }
 
     [McpServerTool(Name = "get_prompt")]

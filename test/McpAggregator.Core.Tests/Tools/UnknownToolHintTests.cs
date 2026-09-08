@@ -140,6 +140,26 @@ public class UnknownToolHintTests
     }
 
     [TestMethod]
+    public async Task InvokeTool_UnknownServer_ReturnsTheMessageInsteadOfAnOpaqueFault()
+    {
+        // Seen in the measurement runs: a small model guessed serverName "email-service" and got
+        // "An error occurred invoking 'invoke_tool'." back, which told it nothing.
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await CallAsync(rig, "invoke_tool", new()
+        {
+            ["serverName"] = "email-service",
+            ["toolName"] = "send_email",
+            ["arguments"] = "{}"
+        });
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "Server 'email-service' not found");
+        Assert.IsFalse(text.Contains("An error occurred invoking"), text);
+    }
+
+    [TestMethod]
     public async Task UnknownServer_NamesRegisteredServersAndFindTools()
     {
         // The rename case: calendar-mcp became adjutant; the caller still holds the old prefix.

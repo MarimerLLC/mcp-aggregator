@@ -65,13 +65,17 @@ public class ToolProxyHandler
     /// <summary>
     /// When a tool call comes back as an error, checks the supplied arguments against the
     /// downstream tool's input schema. Returns a corrective message (listing the missing/unknown
-    /// keys and the full schema) only when there is an actual argument mismatch — genuine tool-side
-    /// errors on schema-valid arguments are left untouched. Returns null when no hint applies.
+    /// keys and the full schema) when there is an actual argument mismatch, or when the keys all
+    /// match but the downstream's error reads like an argument-binding failure (a value of the
+    /// wrong type — a string where the schema wants an array is the classic small-model slip).
+    /// Genuine tool-side errors on schema-valid arguments are left untouched. Returns null when no
+    /// hint applies.
     /// </summary>
     private async Task<string?> TryBuildArgumentHintAsync(
         string serverName,
         string toolName,
         IReadOnlyDictionary<string, object?>? providedArgs,
+        string errorText,
         CancellationToken ct)
     {
         try
@@ -98,7 +102,8 @@ public class ToolProxyHandler
                 ? providedKeys.Where(k => !propertyNames.Contains(k, StringComparer.Ordinal)).ToList()
                 : [];
 
-            if (missingRequired.Count == 0 && unknownKeys.Count == 0)
+            var keysMatch = missingRequired.Count == 0 && unknownKeys.Count == 0;
+            if (keysMatch && !LooksLikeBindingFailure(errorText))
                 return null;
 
             var schemaText = JsonSerializer.Serialize(schema, SchemaHintJsonOptions);
@@ -109,6 +114,8 @@ public class ToolProxyHandler
                 sb.Append("Missing required parameter(s): [").Append(string.Join(", ", missingRequired)).Append("]. ");
             if (unknownKeys.Count > 0)
                 sb.Append("Unrecognized argument key(s): [").Append(string.Join(", ", unknownKeys)).Append("]. ");
+            if (keysMatch)
+                sb.Append("Every key matched the schema, so a supplied value did not match its declared type (for example a string where an array is required). ");
             if (providedKeys.Count > 0)
                 sb.Append("You sent: [").Append(string.Join(", ", providedKeys)).Append("]. ");
             sb.Append("Re-invoke with arguments matching this input schema: ").Append(schemaText);
@@ -155,6 +162,17 @@ public class ToolProxyHandler
             return null;
         }
     }
+
+    /// <summary>
+    /// The C# SDK reports a downstream binding failure as "An error occurred invoking '{tool}'."
+    /// with the detail confined to the server log; other SDKs say "invalid arguments" or
+    /// "validation". None of them name the parameter, which is why the schema is attached.
+    /// </summary>
+    private static bool LooksLikeBindingFailure(string errorText)
+        => errorText.Contains("An error occurred invoking", StringComparison.OrdinalIgnoreCase)
+           || errorText.Contains("invalid argument", StringComparison.OrdinalIgnoreCase)
+           || errorText.Contains("invalid params", StringComparison.OrdinalIgnoreCase)
+           || errorText.Contains("validation", StringComparison.OrdinalIgnoreCase);
 
     internal static object? ConvertJsonElement(JsonElement element)
     {
@@ -245,7 +263,7 @@ public class ToolProxyHandler
                 // SDKs sanitize the binding error to a generic message, so attach the authoritative
                 // schema and the specific mismatch so the model can retry without a separate
                 // get_service_details round-trip.
-                var hint = await TryBuildArgumentHintAsync(serverName, toolName, args, ct);
+                var hint = await TryBuildArgumentHintAsync(serverName, toolName, args, errorText, ct);
                 if (hint is not null)
                 {
                     result.Content = [.. result.Content, new TextContentBlock { Text = hint }];
