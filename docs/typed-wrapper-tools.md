@@ -303,9 +303,75 @@ model because it never sent a malformed call. **Still open:** the reliability cl
 needs a genuinely low-tier model (8B or smaller, or `gpt-4.1-nano` / `gemini-flash-8b` class),
 which is a one-line change to the harness invocation once an endpoint exists.
 
+#### Run 2 — 2026-09-08, three low-tier models via OpenRouter
+
+Full tables: [qwen/qwen3-8b](measurements/2026-09-08-openrouter-qwen3-8b.md),
+[meta-llama/llama-3.1-8b-instruct](measurements/2026-09-08-openrouter-llama-3.1-8b.md),
+[openai/gpt-4.1-nano](measurements/2026-09-08-openrouter-gpt-4.1-nano.md). Same harness, tasks
+and stubs as run 1; reasoning off; 10 runs per task per condition. Provider-side HTTP 400s (all
+ten `invoke_tool` runs of `docs_search` on qwen3-8b, five scattered runs on llama) are excluded
+from the rates below and noted in the per-model files.
+
+**This is the low tier the issue is about, and the picture flips.**
+
+| Model | Condition | First-call success | Completed | Input tok / task | Time / task |
+|---|---|---:|---:|---:|---:|
+| qwen/qwen3-8b | Eager | **50/50 (100%)** | 50/50 | 4,001 | 1.5 s |
+| qwen/qwen3-8b | Lazy | **50/50 (100%)** | 50/50 | 6,801 | 2.9 s |
+| qwen/qwen3-8b | `invoke_tool` | 10/40 (25%) | 10/40 (25%) | 7,065 | 4.0 s |
+| llama-3.1-8b-instruct | Eager | 20/50 (40%) | 22/50 (44%) | 4,669 | 0.5 s |
+| llama-3.1-8b-instruct | Lazy | 17/48 (35%) | 32/48 (67%) | 10,642 | 3.6 s |
+| llama-3.1-8b-instruct | `invoke_tool` | **0/47 (0%)** | 5/47 (11%) | 10,036 | 3.5 s |
+| gpt-4.1-nano | Eager | **45/50 (90%)** | 49/50 (98%) | 2,684 | 2.0 s |
+| gpt-4.1-nano | Lazy | 30/50 (60%) | 38/50 (76%) | 4,769 | 17.1 s |
+| gpt-4.1-nano | `invoke_tool` | 5/50 (10%) | 22/50 (44%) | 18,482 | 7.0 s |
+
+**What the models actually did on the old surface** (from the per-run records):
+
+- **qwen3-8b** never did discovery. It invented server names — `email-service`,
+  `mcp-aggregator` — in 20 of 40 runs, refused the calendar task outright in 10 ("I don't have
+  access to your calendar"), and completed only `list_files_personal`. It did not retry after
+  "Server 'x' not found." even once. With the typed tools it was perfect: one call, correct
+  arguments, every task, in both modes.
+- **llama-3.1-8b** produced the exact failure trace from rockbot #420: `invoke_tool({})`, no
+  arguments at all, in 22 of 47 runs, then wandered off registering imaginary servers with
+  `register_server`. On the typed surface its arguments were right, but the OpenRouter provider
+  returned about half of its tool calls as plain text (`<adjutant__send_email>{"to":
+  ["alice@example.com"], …}</function>`) rather than as function calls, which no host can
+  execute. Inside that text the arguments were correct in most cases. That is a model/template
+  problem, not an aggregator one, and Eager's 40% is the ceiling it allows.
+- **gpt-4.1-nano** did discovery correctly, then in 15 of 50 runs passed the typed name it had
+  just read from `list_services` (`adjutant__send_email`) as the downstream `toolName`, and in
+  others sent `to` as a string where the schema wants an array. On the typed surface it used the
+  right shapes. Its Eager misses were `adjutant__list_accounts` before `send_email` — arguably
+  reasonable (pick an account first), scored as a miss by the strict first-call metric — and its
+  Lazy misses were mostly answering after `find_tools` without making the second call.
+
+These runs used the build after the first two escape-hatch fixes ("Server not found" as a
+result instead of an opaque fault; the type-mismatch schema hint) and before the three that
+followed from them (registered-server list on unknown server, the wrapper-name-as-`toolName`
+explanation, non-JSON `arguments` reported). A re-run of the `invoke_tool` condition with those in
+place is recorded below when available.
+
+**What this answers for rockbot #420:**
+
+- **Q1 (reliability):** for 8B-class models the typed surface is the difference between working
+  and not working: 100% vs 25% (qwen3-8b), 90% vs 10% (gpt-4.1-nano), 40% vs 0% (llama-3.1-8b)
+  on the first downstream call. The mid-tier result from run 1 stands as the other end of the
+  curve: a 27B model does not need the wrappers for correctness, only for cost.
+- **Q8 (token budget):** Eager is the cheapest per task for every model, because it is one call.
+  Lazy costs one extra turn and, for the weakest models, that turn is where they drop the ball
+  (nano 60% vs 90%; llama's `find_tools` runs often ended in text instead of the second call).
+  When the host's tool cap allows Eager, use Eager for a low tier; use Lazy when it does not, and
+  accept the extra turn.
+- **Q6 (recovery):** small models mostly do not recover from any error text, however good. qwen3-8b
+  retried after "Server not found" zero times. The hints are worth having for the models that
+  read them (nano completed 22/50 on the old surface, almost all after a hint), but the durable
+  fix is the one this change makes: do not give the model a call shape it can get wrong.
+- **Q9:** no model confused the two OneDrive servers on the typed surface.
+
 #### Not yet measured
 
-- Low-tier model reliability (see above).
 - Host behavior: what Claude Desktop does at the 44-tool cap in Eager mode; whether Claude
   Desktop, Claude Code and rockbot's client honor `list_changed` in Lazy mode.
 - The rename drill on a real host (register, activate, re-register under a new name).
