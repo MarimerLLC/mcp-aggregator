@@ -110,9 +110,17 @@ The SDK's argument binding does not run for a wrapper (it is a direct `McpServer
 not an `AIFunction`), so the wrapper does its own pre-flight: any key in the schema's `required`
 that is absent produces an `isError` result naming the parameter and embedding the schema, and the
 downstream is never called. Everything else is the shared proxy path, so a downstream `isError`
-still carries the argument hint. `AggregatorToolErrorFilter` is unaffected (it only converts
-binding `ArgumentException`s, which wrappers never raise). Covered by
-`DownstreamToolWrapperTests` and `ListChangedEndToEndTests`.
+still carries the argument hint. `AggregatorToolErrorFilter` is unaffected by wrappers on the
+binding path (it only converts binding `ArgumentException`s, which wrappers never raise).
+
+The filter does gain a second job: a `tools/call` for a name the aggregator does not expose. With
+wrappers that is usually a **stale tool list** — the server was renamed (Q2/Q3), disabled, or in
+Lazy mode the wrapper was never activated. Instead of the SDK's bare `Unknown tool: 'x'` fault the
+caller gets an `isError` result from `WrapperToolCatalog.BuildUnknownToolHintAsync` that names the
+cause (unknown server with the registered names, disabled server, unknown tool with the server's
+real tool names) and the recovery (`find_tools`, refresh the tool list, `invoke_tool`). When the
+wrapper does exist, the hint activates it on the spot so a retry after a refresh succeeds. Covered
+by `DownstreamToolWrapperTests`, `ListChangedEndToEndTests` and `AggregatorToolErrorFilterTests`.
 
 ### Q7 — Mutation → `ToolCollection` → `list_changed`
 

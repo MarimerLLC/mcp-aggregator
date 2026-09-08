@@ -182,4 +182,35 @@ public class AggregatorToolErrorFilterTests
         Assert.IsFalse(text.Contains("Argument binding failed"),
             $"A fault from inside the tool body was misreported as a binding failure: {text}");
     }
+
+    // ---- Unknown tool names (issue #39: stale wrapper names) -----------------------------------
+
+    [TestMethod]
+    public async Task UnknownTool_WithoutACatalog_ReturnsTheFallbackHintInsteadOfFaulting()
+    {
+        // A bare server with no WrapperToolCatalog in DI: the filter must still turn the SDK's
+        // "Unknown tool" fault into a self-correcting error result.
+        var tool = ToolFor(nameof(Sample));
+        await using var server = new InMemoryMcpServer("filtered", WithFilter(), tool);
+        var client = await server.CreateClientAsync();
+
+        var result = await client.CallToolAsync("ghost__echo", new Dictionary<string, object?>());
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = string.Join("\n", result.Content.OfType<TextContentBlock>().Select(b => b.Text));
+        StringAssert.Contains(text, "Unknown tool 'ghost__echo'");
+        StringAssert.Contains(text, "tool list may be out of date");
+        StringAssert.Contains(text, "find_tools(query: \"echo\")");
+        StringAssert.Contains(text, "invoke_tool(serverName: \"ghost\", toolName: \"echo\"");
+    }
+
+    [TestMethod]
+    public void FallbackHint_ForANonWrapperName_PointsAtFindTools()
+    {
+        var hint = AggregatorToolErrorFilter.BuildUnknownToolFallbackHint("send_email");
+
+        StringAssert.Contains(hint, "Unknown tool 'send_email'");
+        StringAssert.Contains(hint, "find_tools(query: \"send_email\")");
+        Assert.IsFalse(hint.Contains("invoke_tool("), "Without a server there is nothing to route invoke_tool to.");
+    }
 }

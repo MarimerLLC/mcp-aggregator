@@ -104,7 +104,7 @@ Content-Type: application/json
 
 - **Server unavailable:** If a server is disabled (via `disable_service`) or cannot be reached, typed tool and `invoke_tool` calls return an error result "Server '{name}' is unavailable." Check `list_services` to see the server's enabled status. In `Eager` mode a disabled server's typed tools are removed from the tool list.
 - **Missing parameter:** A typed tool called without a required parameter returns an error naming it. `invoke_tool` errors on argument mismatches attach the missing/unknown keys and the schema.
-- **Unknown typed tool:** If a `{server}__{tool}` name is rejected by your client, the server may have been renamed or the tool removed. Run `find_tools` again or `get_service_details(serverName)`.
+- **Unknown typed tool:** Calling a `{server}__{tool}` name the aggregator does not currently expose returns an error result that says why: the server was renamed or removed (with the registered server names), the server is disabled, the server has no such tool (with its actual tool names), or the tool exists but was not in your tool list yet — in that case the aggregator activates it and sends `tools/list_changed`, so refresh your tool list and retry, or use `invoke_tool` immediately. If your client rejects the name before sending it, run `find_tools` again.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
 - **Slow first call:** Connections to downstream servers are lazy. The first call to a server may take longer as the connection is established. Subsequent calls will be faster.
 ## Tips

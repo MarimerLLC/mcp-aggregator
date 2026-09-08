@@ -223,6 +223,82 @@ public sealed class WrapperToolCatalog
         => ToolCollection.TryGetPrimitive(wrapperName, out var tool) && tool is DownstreamToolWrapper;
 
     /// <summary>
+    /// Explains a <c>tools/call</c> for a name the aggregator does not currently expose, so the
+    /// caller can self-correct instead of concluding the tool is broken. Distinguishes a server
+    /// that was renamed or removed, a disabled server, an unknown tool on a known server, and a
+    /// real wrapper that simply was not in the caller's tool list yet — in which case the wrapper
+    /// is activated so a retry (after a tool-list refresh) succeeds.
+    /// </summary>
+    public async Task<string> BuildUnknownToolHintAsync(string toolName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+
+        if (!WrapperNaming.TryParse(toolName, out var serverName, out var downstreamTool))
+        {
+            var aggregatorTools = ToolCollection
+                .Where(t => t is not DownstreamToolWrapper)
+                .Select(t => t.ProtocolTool.Name)
+                .Order(StringComparer.Ordinal);
+            return $"Unknown tool '{toolName}'. Aggregator tools: [{string.Join(", ", aggregatorTools)}]. " +
+                   $"Downstream tools are typed tools named '{{server}}{WrapperNaming.Separator}{{tool}}'. " +
+                   $"Call find_tools(query: \"{toolName}\") to get current tool names and schemas, " +
+                   "or list_services to browse servers.";
+        }
+
+        if (!_registry.TryGet(serverName, out var server) || server is null)
+        {
+            var registered = _registry.GetAll()
+                .Where(s => s.Enabled)
+                .Select(s => s.Name)
+                .Order(StringComparer.OrdinalIgnoreCase);
+            return $"Unknown tool '{toolName}': no server named '{serverName}' is registered. " +
+                   "It may have been renamed or removed since your tool list was loaded. " +
+                   $"Registered servers: [{string.Join(", ", registered)}]. " +
+                   $"Call find_tools(query: \"{downstreamTool}\") to find the tool's current name, then refresh your tool list.";
+        }
+
+        if (!server.Enabled)
+        {
+            return $"Tool '{toolName}' is not available: server '{server.Name}' is disabled. " +
+                   $"Call enable_service(serverName: \"{server.Name}\") to re-enable it, then refresh your tool list and retry.";
+        }
+
+        IReadOnlyList<DownstreamToolWrapper> wrappers;
+        try
+        {
+            wrappers = await GetWrappersAsync(server.Name, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return $"Tool '{toolName}' is not available: server '{server.Name}' is registered but could not be reached " +
+                   $"({ex.Message}). Retry later, or call refresh_service(serverName: \"{server.Name}\").";
+        }
+
+        var wrapper = wrappers.FirstOrDefault(w => string.Equals(w.ProtocolTool.Name, toolName, StringComparison.Ordinal));
+        if (wrapper is null)
+        {
+            var names = wrappers.Select(w => w.ProtocolTool.Name).Order(StringComparer.Ordinal);
+            return $"Unknown tool '{toolName}': server '{server.Name}' has no tool '{downstreamTool}'. " +
+                   $"Its tools: [{string.Join(", ", names)}]. " +
+                   $"Call get_service_details(serverName: \"{server.Name}\") for their input schemas, then refresh your tool list.";
+        }
+
+        // The wrapper exists; the caller's tool list is simply behind. Make it callable now.
+        var activatedNow = !IsActive(wrapper.ProtocolTool.Name);
+        if (activatedNow)
+            await ActivateAsync([wrapper], ct);
+
+        var schema = wrapper.ProtocolTool.InputSchema.GetRawText();
+        var state = activatedNow
+            ? "It was not in the aggregator's tool list yet; it has been activated and tools/list_changed was sent."
+            : "It is in the aggregator's tool list now.";
+        return $"Tool '{toolName}' exists on server '{server.Name}' but was not in your tool list. {state} " +
+               "Refresh your tool list and retry, or call it now via " +
+               $"invoke_tool(serverName: \"{server.Name}\", toolName: \"{wrapper.ToolName}\", arguments: <JSON object as a string>). " +
+               $"Input schema: {schema}";
+    }
+
+    /// <summary>
     /// Reconciles the tool collection with the desired wrapper set: every wrapper of every enabled
     /// server in <see cref="WrapperToolMode.Eager"/> mode, or the activated wrappers that still
     /// exist in <see cref="WrapperToolMode.Lazy"/> mode. Servers whose tools cannot be listed are
