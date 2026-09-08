@@ -80,9 +80,11 @@ The session key is `McpServer.SessionId` when the transport has one (stateful HT
 yields exactly "no memory between requests". (`request.Server` is a fresh
 `DestinationBoundMcpServer` facade per request in SDK 2.2.0 and cannot serve as a key.)
 
-Defaults: the stdio host keeps `Lazy` (Claude Desktop caps the total tool count at roughly 44
-across all servers; eager registration of a 55-tool inventory would blow that on its own). The
-HTTP host's `appsettings.json` sets `Eager`, for the reason under Q7.
+Defaults: both hosts ship `Lazy`. On stdio, Claude Desktop caps the total tool count at roughly
+44 across all servers, and eager registration of a 55-tool inventory would blow that on its own.
+On stateless HTTP, Lazy means wrappers are never listed and are called by name (Q7); the HTTP host
+first shipped `Eager` for that reason and was switched once by-name dispatch existed, since its
+clients are programmatic and the minimal `tools/list` is the point.
 
 ### Q2 / Q3 — Naming and stable identity
 
@@ -163,8 +165,8 @@ does not change and no notification is sent.
 So on the stateless HTTP host, Lazy mode never lists a wrapper: each request is its own session,
 nothing carries over, and no `list_changed` can be delivered. Wrappers are still callable by name
 after `find_tools`, which suits programmatic clients (rockbot) but not hosts that refuse to call an
-unlisted tool. That is why the HTTP host defaults to `Eager`. The stdio host gets the per-session
-broadcast on activation.
+unlisted tool; those need `Eager` on the HTTP host. The stdio host gets the per-session broadcast
+on activation.
 
 One more stateless-HTTP wrinkle, found during the manual check: the SDK builds a **fresh
 `McpServerOptions` per request** through `IOptionsFactory`, and its options setup runs

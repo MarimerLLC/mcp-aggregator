@@ -177,11 +177,11 @@ earlier session) can call it directly; the aggregator resolves it by name and, f
 it for that session. `Lazy` is the default because Claude Desktop caps the total number of tools
 across all connected servers at roughly 44.
 
-The HTTP host ships with `Eager` in its `appsettings.json`. It runs MCP over **stateless** HTTP,
-where every request is its own session: in `Lazy` mode wrappers are never listed there (nothing
-carries over between requests) and are only callable by name, which suits programmatic clients but
-not hosts that refuse to call a tool they have not listed. Switch it to `Lazy` if your HTTP
-clients call by name and you want the smallest possible `tools/list`.
+Both hosts ship with `Lazy`. The HTTP host runs MCP over **stateless** HTTP, where every request
+is its own session: wrappers are never listed there (nothing carries over between requests) and
+are called by name after `find_tools`, which keeps `tools/list` at its minimum for every client.
+A host that refuses to call a tool it has not listed can only reach downstreams through
+`invoke_tool` on that endpoint; set `WrapperMode` to `Eager` for such clients.
 
 Wrapper names track the registered server name. Unregistering and re-registering a server under a
 new name removes the old wrappers and adds new ones, and the server's immutable `id` (shown in
@@ -267,7 +267,7 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `IndexCacheTtl` | 5 minutes | How long to cache the service index |
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
-| `WrapperMode` | `Lazy` (`Eager` in the HTTP host's appsettings) | When typed `{server}__{tool}` wrappers appear in `tools/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
+| `WrapperMode` | `Lazy` | When typed `{server}__{tool}` wrappers appear in `tools/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
 | `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
 | `SelfDescription` | *(built-in)* | Description shown for the aggregator in the service index |
 

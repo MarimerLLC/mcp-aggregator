@@ -78,8 +78,8 @@ The 2.x line implements the MCP **2026-07-28** spec. Behaviors that matter here:
   negotiated a pre-2026-07-28 protocol via `initialize` (Claude Desktop, Claude Code, rockbot) gets a
   session-wide broadcast. A 2026-07-28 client (the SDK client's default) receives it **only** after opening a
   `subscriptions/listen` stream with `toolsListChanged: true` (SEP-2575) — the SDK client does not do that
-  on its own. `ListChangedEndToEndTests` covers both. This is why the HTTP host defaults `WrapperMode` to
-  `Eager`.
+  on its own. `ListChangedEndToEndTests` covers both. On stateless HTTP no `list_changed` is ever delivered and Lazy
+  wrappers are called by name only.
 - **Discovery-first negotiation** — clients probe `server/discover` and fall back to the legacy
   `initialize` handshake for down-level servers. `client.ServerInfo` / `ServerInstructions` are
   populated either way.
