@@ -350,8 +350,25 @@ from the rates below and noted in the per-model files.
 These runs used the build after the first two escape-hatch fixes ("Server not found" as a
 result instead of an opaque fault; the type-mismatch schema hint) and before the three that
 followed from them (registered-server list on unknown server, the wrapper-name-as-`toolName`
-explanation, non-JSON `arguments` reported). A re-run of the `invoke_tool` condition with those in
-place is recorded below when available.
+explanation, non-JSON `arguments` reported). The `invoke_tool` condition was then re-run with
+those in place
+([qwen3-8b](measurements/2026-09-08-openrouter-qwen3-8b-invoke-tool-after-fixes.md),
+[llama-3.1-8b](measurements/2026-09-08-openrouter-llama-3.1-8b-invoke-tool-after-fixes.md),
+[gpt-4.1-nano](measurements/2026-09-08-openrouter-gpt-4.1-nano-invoke-tool-after-fixes.md)):
+
+| Model, `invoke_tool` surface | First-call success | Completed before fixes | Completed after fixes | Steps to done |
+|---|---:|---:|---:|---:|
+| qwen/qwen3-8b | 10/50 (20%) | 10/40 (25%) | **40/50 (80%)** | 3.5 |
+| llama-3.1-8b-instruct | 2/46 (4%) | 5/47 (11%) | 13/46 (28%) | 3.2 |
+| gpt-4.1-nano | 7/50 (14%) | 22/50 (44%) | 23/50 (46%) | 4.7 |
+
+The first call is as bad as before — the fixes are about what happens after it — but the
+recovery text now works for the model that reads it: every qwen3-8b run that guessed a server
+name recovered once the error listed the registered servers, and its only remaining failures are
+the ten calendar refusals where it never called a tool at all. nano did not move: its stuck runs
+never reach a downstream (it loops on `list_services` / `get_service_details` until the step
+budget is gone), so there is no error to recover from. Even at its best, recovery on the old
+surface costs 3–5 calls and 2–3× the tokens of one typed call.
 
 **What this answers for rockbot #420:**
 
@@ -364,10 +381,11 @@ place is recorded below when available.
   (nano 60% vs 90%; llama's `find_tools` runs often ended in text instead of the second call).
   When the host's tool cap allows Eager, use Eager for a low tier; use Lazy when it does not, and
   accept the extra turn.
-- **Q6 (recovery):** small models mostly do not recover from any error text, however good. qwen3-8b
-  retried after "Server not found" zero times. The hints are worth having for the models that
-  read them (nano completed 22/50 on the old surface, almost all after a hint), but the durable
-  fix is the one this change makes: do not give the model a call shape it can get wrong.
+- **Q6 (recovery):** error text that names the fix does help the models that read it — listing
+  the registered servers took qwen3-8b's old-surface completion from 25% to 80% — but it costs
+  3–5 calls per task, some models never reach an error to recover from (nano's loops), and none
+  of it matters on the typed surface, where the first call is right. The hints are worth
+  shipping; the durable fix is not giving the model a call shape it can get wrong.
 - **Q9:** no model confused the two OneDrive servers on the typed surface.
 
 #### Not yet measured
