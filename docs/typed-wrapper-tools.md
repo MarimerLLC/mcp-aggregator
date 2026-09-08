@@ -232,10 +232,85 @@ OpenAI-style servers). `--provider azure` targets an Azure AI Foundry `.../model
 
 ### Results
 
-Pending. The implementation ships with the `via` tag so these can be split by path. Fill in when
-a hosted low-tier model key (Azure AI Foundry or OpenRouter) is available.
+#### Run 1 — 2026-09-08, `qwen3.8` on llama.cpp (local network)
 
-### Reliability: first-call success by path and model tier
+Full tables: [thinking off](measurements/2026-09-08-qwen3.8-thinking-off.md),
+[thinking on](measurements/2026-09-08-qwen3.8-thinking-on.md).
+
+Model as reported by the server: 27.3B parameters, IQ3_S quantization (3.4 bpw), 131k context.
+**This is not an 8B-class model**, so it is a mid-tier data point, not the low-tier one the issue
+asks for. 10 runs per task per condition, 5 tasks, stub downstreams, 300 runs total, zero
+transport errors. The Lazy condition used a cold aggregator per run, which is equivalent to the
+per-session activation that shipped afterwards for a single client.
+
+**Reliability by path** (first downstream call hit the right tool with usable arguments; the task
+was eventually completed):
+
+| Condition | Thinking | First-call success | Completed | Wrong tool first |
+|---|---|---:|---:|---:|
+| Eager (wrappers listed) | off | 48/50 (96%) | 50/50 | 0 |
+| Lazy (`find_tools` → wrapper) | off | 47/50 (94%) | 50/50 | 0 |
+| `invoke_tool` (pre-#39 surface) | off | 49/50 (98%) | 50/50 | 0 |
+| Eager | on | 47/50 (94%) | 50/50 | 0 |
+| Lazy | on | 50/50 (100%) | 50/50 | 0 |
+| `invoke_tool` | on | 47/50 (94%) | 50/50 | 0 |
+
+Every single first-call miss, in every condition, was the same thing: the calendar task sent
+`end` equal to `start` for "tomorrow" (a date-range semantics slip, corrected on the retry). Not
+one run in 300 produced the failure the issue is about — a downstream call with missing or
+misshapen arguments. This model authors the stringified JSON blob for `invoke_tool` as reliably as
+it fills typed parameters, and it never confused the two OneDrive servers' identical `list_files`
+tools (Q9). **For a model of this size the wrapper benefit is not reliability.**
+
+**Cost and latency by path** (per task, all five tasks averaged):
+
+| Condition | Thinking | Steps to done | Model turns | Input tokens | Output tokens | Wall time |
+|---|---|---:|---:|---:|---:|---:|
+| Eager | off | 1.0 | 1.0 | 4,288 | 52 | 1.1 s |
+| Lazy | off | 2.0 | 2.0 | 7,599 | 79 | 3.0 s |
+| `invoke_tool` | off | 3.0 | 3.0 | 10,259 | 123 | 3.9 s |
+| Eager | on | 1.0 | 1.0 | 4,410 | 130 | 2.4 s |
+| Lazy | on | 2.0 | 2.0 | 7,420 | 147 | 4.1 s |
+| `invoke_tool` | on | 3.0 | 3.0 | 10,562 | 270 | 6.5 s |
+
+The old surface costs three tool calls for every downstream action (`list_services` →
+`get_service_details` → `invoke_tool`, exactly the discovery flow the old instructions taught),
+**2.4× the input tokens and 3.4× the wall time of Eager**. Lazy costs one extra turn for
+`find_tools` and lands in between on totals, while keeping the per-turn tool list at 7.8 KB
+instead of 13.6 KB.
+
+**`tools/list` size** (the per-turn context cost of the tool surface):
+
+| Condition | Tools | Bytes |
+|---|---:|---:|
+| Eager | 27 (14 aggregator + 13 wrappers) | 13,593 |
+| Lazy, before any activation | 14 | 7,754 |
+| Lazy, after activating everything the five tasks touched | 23 | 11,969 |
+| `invoke_tool` surface (no `find_tools`) | 13 | 7,004 |
+
+With per-session activation a session pays only for the wrappers it activated, so a real Lazy
+session sits near the 7.8 KB floor plus the servers it actually used.
+
+**Thinking on vs off:** no reliability difference worth the name; roughly 2× the output tokens
+and 1.5–2× the latency. A deployment that runs a low tier for cost would run it off.
+
+**What this answers for rockbot #420:** Q1/Q8 — on token budget alone, typed wrappers beat the
+generic proxy decisively, and Lazy is the right default when the host caps tools; Q9 —
+prefixing resolved every collision; Q6 — the pre-flight and hints were never exercised by this
+model because it never sent a malformed call. **Still open:** the reliability claim itself. It
+needs a genuinely low-tier model (8B or smaller, or `gpt-4.1-nano` / `gemini-flash-8b` class),
+which is a one-line change to the harness invocation once an endpoint exists.
+
+#### Not yet measured
+
+- Low-tier model reliability (see above).
+- Host behavior: what Claude Desktop does at the 44-tool cap in Eager mode; whether Claude
+  Desktop, Claude Code and rockbot's client honor `list_changed` in Lazy mode.
+- The rename drill on a real host (register, activate, re-register under a new name).
+
+### Templates for the remaining runs
+
+#### Reliability: first-call success by path and model tier
 
 Fixed task set: `adjutant/send_email`, `adjutant/get_calendar_events`, `onedrive-*/list_files`,
 `microsoft-learn/microsoft_docs_search`. Ten runs each. Source: `mcp_tool_invocations_total`
@@ -248,7 +323,7 @@ grouped by `via` and `result`.
 | Low | | `wrapper` | | | |
 | Low | | `invoke_tool` | | | |
 
-### Token cost
+#### Token cost
 
 | Mode | `tools/list` bytes | Tools listed | Prompt-token delta per turn |
 |---|---|---|---|
@@ -256,7 +331,7 @@ grouped by `via` and `result`.
 | Lazy (before activation) | | | |
 | Lazy (after `find_tools`) | | | |
 
-### Host behavior
+#### Host behavior
 
 | Host | Protocol negotiated | Honors `list_changed` | Behavior at the 44-tool cap (Eager) | Activated-then-removed tool |
 |---|---|---|---|---|
@@ -266,7 +341,7 @@ grouped by `via` and `result`.
 | C# SDK client (tests) | 2025-06-18 / 2026-07-28 | yes (broadcast) / yes (with `subscriptions/listen`) | n/a | removed from next `tools/list` |
 | Stateless HTTP | any | no | n/a | removed from next `tools/list` |
 
-### Rename drill
+#### Rename drill
 
 Register `calendar-mcp`, activate its wrappers, unregister, register the same transport as
 `adjutant`. Expected: `calendar-mcp__*` gone, `adjutant__*` present, `id` differs, one
