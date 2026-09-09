@@ -61,6 +61,7 @@ microsoft-learn__microsoft_docs_search(query: "dependency injection in ASP.NET C
 ```
 
 - A typed tool called without one of its required parameters returns an error naming the parameter and embedding the schema; the downstream is not contacted. Re-invoke with the missing parameter.
+- `list_services` includes the aggregator itself (`id: "self"`) so this guide is discoverable via `get_service_skill`. Its `tools` are the aggregator's own tools, called directly by name; `invoke_tool` only reaches real downstreams.
 - Each server has an immutable `id` (in `list_services`, `get_service_details`, `find_tools`). Typed tool names follow the server *name*; if a server is unregistered and re-registered under a new name, its typed tools change and its `id` changes. If a stored typed name stops existing, run `find_tools` again.
 - `WrapperMode` on the aggregator is `Lazy` (typed tools appear in **your** tool list after you call `find_tools` / `get_service_details`, and the aggregator sends you `tools/list_changed`; other clients' lists are unaffected) or `Eager` (all typed tools are always listed). In either mode the aggregator accepts a typed tool by name as soon as you know it, listed or not; whether your client lets the call out is the *Client capability* question above. `find_tools` reports the mode.
 

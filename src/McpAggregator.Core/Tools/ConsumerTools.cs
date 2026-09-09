@@ -71,10 +71,11 @@ public class ConsumerTools
     {
         var details = await toolIndex.GetDetailsAsync(serverName, ct);
 
-        if (catalog.Mode == WrapperToolMode.Lazy && details.Enabled)
+        if (catalog.Mode == WrapperToolMode.Lazy && details.Enabled && details.Id != ToolIndex.SelfId)
         {
             // Drilling into a server is a strong signal the caller intends to use it, so expose
             // its wrappers to this session now rather than requiring a separate find_tools call.
+            // (The aggregator's own entry has no wrappers; its tools are already on this connection.)
             await catalog.ActivateServerAsync(server, serverName, ct);
         }
 

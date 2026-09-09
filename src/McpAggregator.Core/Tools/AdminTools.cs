@@ -27,6 +27,17 @@ public class AdminTools
         "enable_service", "disable_service",
     };
 
+    /// <summary>Name and description of every tool declared here, in declaration order.</summary>
+    public static IReadOnlyList<(string Name, string? Description)> Describe()
+        => typeof(AdminTools)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Select(m => (
+                Name: m.GetCustomAttributes(typeof(McpServerToolAttribute), false).OfType<McpServerToolAttribute>().FirstOrDefault()?.Name,
+                Description: m.GetCustomAttributes(typeof(DescriptionAttribute), false).OfType<DescriptionAttribute>().FirstOrDefault()?.Description))
+            .Where(t => t.Name is not null)
+            .Select(t => (t.Name!, t.Description))
+            .ToList();
+
     [McpServerTool(Name = "enable_service")]
     [Description("Enable a registered MCP server, allowing its tools to be invoked.")]
     public static async Task<string> EnableService(

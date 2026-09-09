@@ -69,21 +69,7 @@ public class ToolIndex
 
         // Advertise the aggregator itself if it has a skill document
         if (_skillStore.Exists(_options.SelfName))
-        {
-            var selfInfo = _mcpServerOptions?.Value.ServerInfo;
-            results.Add(new ServiceIndex
-            {
-                Name = _options.SelfName,
-                DisplayName = "MCP Aggregator",
-                Description = _options.SelfDescription,
-                Enabled = true,
-                Available = true,
-                HasSkillDocument = true,
-                RemoteName = selfInfo?.Name,
-                RemoteTitle = selfInfo?.Title,
-                RemoteVersion = selfInfo?.Version
-            });
-        }
+            results.Add(SelfIndex());
 
         foreach (var server in servers)
         {
@@ -169,8 +155,89 @@ public class ToolIndex
             : "stale";
     }
 
+    /// <summary><see cref="ServiceIndex.Id"/> of the aggregator's own entry; real downstreams carry hex ids.</summary>
+    public const string SelfId = "self";
+
+    private const string SelfNote =
+        " This entry is the aggregator itself, not a downstream: its tools are ordinary tools on this connection, " +
+        "called directly by name and never through invoke_tool.";
+
+    /// <summary>
+    /// The aggregator's own tools: everything in the shared collection that is not a downstream
+    /// wrapper, plus the administrative tools (absent from the collection in Lazy mode). Each
+    /// tool's <c>wrapperName</c> is its own name, since it is called directly.
+    /// </summary>
+    private List<ToolDetail> OwnTools()
+    {
+        var tools = new List<ToolDetail>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        var collection = _mcpServerOptions?.Value.ToolCollection;
+        if (collection is not null)
+        {
+            foreach (var tool in collection)
+            {
+                if (tool is DownstreamToolWrapper || !seen.Add(tool.ProtocolTool.Name))
+                    continue;
+                tools.Add(new ToolDetail
+                {
+                    Name = tool.ProtocolTool.Name,
+                    Description = tool.ProtocolTool.Description,
+                    InputSchema = tool.ProtocolTool.InputSchema,
+                    WrapperName = tool.ProtocolTool.Name,
+                });
+            }
+        }
+
+        foreach (var (name, description) in AdminTools.Describe())
+        {
+            if (seen.Add(name))
+                tools.Add(new ToolDetail { Name = name, Description = description, WrapperName = name });
+        }
+
+        return tools;
+    }
+
+    private ServiceIndex SelfIndex()
+    {
+        var selfInfo = _mcpServerOptions?.Value.ServerInfo;
+        return new ServiceIndex
+        {
+            Id = SelfId,
+            Name = _options.SelfName,
+            DisplayName = "MCP Aggregator",
+            Description = _options.SelfDescription + SelfNote,
+            Enabled = true,
+            Available = true,
+            HasSkillDocument = true,
+            RemoteName = selfInfo?.Name,
+            RemoteTitle = selfInfo?.Title,
+            RemoteVersion = selfInfo?.Version,
+            Tools = OwnTools().Select(t => new ToolSummary { Name = t.Name, Description = t.Description, WrapperName = t.WrapperName }).ToList(),
+        };
+    }
+
     public async Task<ServiceDetails> GetDetailsAsync(string serverName, CancellationToken ct = default)
     {
+        if (string.Equals(serverName, _options.SelfName, StringComparison.OrdinalIgnoreCase))
+        {
+            var self = SelfIndex();
+            return new ServiceDetails
+            {
+                Id = self.Id,
+                Name = self.Name,
+                DisplayName = self.DisplayName,
+                Description = self.Description,
+                Enabled = true,
+                Available = true,
+                HasSkillDocument = _skillStore.Exists(_options.SelfName),
+                RemoteName = self.RemoteName,
+                RemoteTitle = self.RemoteTitle,
+                RemoteVersion = self.RemoteVersion,
+                Tools = OwnTools(),
+            };
+        }
+
         await _registry.EnsureLoadedAsync(ct);
         var server = _registry.Get(serverName);
         var tools = await GetToolsForServerAsync(serverName, ct);

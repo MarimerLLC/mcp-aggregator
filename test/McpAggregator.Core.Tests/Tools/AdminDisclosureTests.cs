@@ -228,6 +228,41 @@ public class AdminDisclosureTests
         StringAssert.Contains(TextOf(result), "hidden until show_admin_tools");
     }
 
+    // ---------------------------------------------------------------- the aggregator's own entry
+
+    [TestMethod]
+    public async Task ListServices_SelfEntry_DescribesTheAggregatorsOwnTools()
+    {
+        // Seen on Claude Desktop: the self entry had id null and no tools, so it read as a broken
+        // downstream and the model tried invoke_tool(serverName: "mcp-aggregator", ...).
+        Directory.CreateDirectory(Path.Combine(_dataDir, "skills"));
+        await File.WriteAllTextAsync(Path.Combine(_dataDir, "skills", "mcp-aggregator.md"), "# guide");
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await rig.Client.CallToolAsync("list_services", cancellationToken: TestTimeout);
+        Assert.IsFalse(result.IsError ?? false, TextOf(result));
+
+        using var doc = JsonDocument.Parse(TextOf(result));
+        var self = doc.RootElement.EnumerateArray().Single(e => e.GetProperty("name").GetString() == "mcp-aggregator");
+        Assert.AreEqual(ToolIndex.SelfId, self.GetProperty("id").GetString());
+        StringAssert.Contains(self.GetProperty("description").GetString(), "never through invoke_tool");
+
+        var tools = self.GetProperty("tools").EnumerateArray()
+            .ToDictionary(t => t.GetProperty("name").GetString()!, t => t.GetProperty("wrapperName").GetString());
+        Assert.IsTrue(tools.ContainsKey("find_tools"), "consumer tools come from the shared collection");
+        Assert.IsTrue(tools.ContainsKey("register_server"), "admin tools are described even though Lazy hides them");
+        Assert.IsFalse(tools.Keys.Any(k => k.Contains("__")), "no downstream wrappers in the self entry");
+        Assert.IsTrue(tools.All(kv => kv.Key == kv.Value), "own tools are called by their own name");
+        Assert.IsTrue(tools.ContainsKey("get_prompt") && tools.ContainsKey("show_admin_tools"));
+
+        var details = await rig.Client.CallToolAsync("get_service_details",
+            new Dictionary<string, object?> { ["serverName"] = "mcp-aggregator" }, cancellationToken: TestTimeout);
+        Assert.IsFalse(details.IsError ?? false, TextOf(details));
+        using var detailDoc = JsonDocument.Parse(TextOf(details));
+        Assert.AreEqual(ToolIndex.SelfId, detailDoc.RootElement.GetProperty("id").GetString());
+        Assert.IsTrue(detailDoc.RootElement.GetProperty("tools").EnumerateArray().Any(t => t.GetProperty("name").GetString() == "update_skill"));
+    }
+
     // ---------------------------------------------------------------- eager
 
     [TestMethod]
