@@ -2,31 +2,41 @@
 
 This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection. The aggregator exposes both an **MCP tool interface** and an equivalent **REST API** — use whichever fits your client.
 
+Every downstream tool is available as a **typed tool named `{server}__{tool}`** (for example `microsoft-learn__microsoft_docs_search`) that takes the downstream tool's own parameters. Use those when your client lets you call them; use `invoke_tool` when it does not (see *Client capability* below). Both reach the same downstream tool.
+
 ## When to Use the Aggregator
 
 - Use the aggregator to discover and call tools on downstream servers that are **only** accessible through it.
 - If a downstream server is also directly connected to your session (e.g., as a native MCP connection), prefer the direct connection for performance — the aggregator adds a proxy hop.
-- Use `list_services` at the start of a session to understand what's available.
+- Use `find_tools` when you know what you need but not which server has it; use `list_services` to browse.
 
 ## Workflow
 
-1. **Discover** — call `list_services` to see all registered downstream servers and a summary of their tools.
-2. **Drill down** — call `get_service_details` with a `serverName` to get full tool schemas (parameter names, types, descriptions) and any prompt templates the server exposes.
-3. **Read the skill** — call `get_service_skill` with a `serverName` to get usage guidance for that server's tools (if a skill document is available).
-4. **Invoke** — call `invoke_tool` with `serverName`, `toolName`, and `arguments` to execute a tool, or call `get_prompt` with `serverName`, `promptName`, and optional `arguments` to retrieve a rendered prompt template.
-5. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
+1. **Find** — call `find_tools(query: "what you need")`. It searches every registered server and returns matching tools with their exact typed name (`tool`), owning server, description and full `inputSchema`. In `Lazy` mode this also adds those tools to your tool list and the aggregator sends `tools/list_changed`.
+2. **Call the typed tool** — call the returned `tool` name directly with the parameters from its `inputSchema`, e.g. `microsoft-learn__microsoft_docs_search(query: "dependency injection")`.
+3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas and prompt templates and, in `Lazy` mode, makes that server's typed tools callable.
+4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
+5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt` the same way for prompt templates.
+6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
+7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
-The same workflow applies via the REST API. Start with `GET /api` to get aggregator info and links, then use the REST endpoints listed in the Tool Reference table below.
+**Client capability.** The aggregator sends `tools/list_changed` to your session when typed tools are activated, and the SDK-level clients re-fetch `tools/list`. Whether *you* can then call the new names depends on your client. Some clients build their tool index once per conversation and reject any name outside it before the call reaches the aggregator; Claude Desktop chat (September 2026, via `mcp-remote`) behaves this way, so a typed tool activated during a conversation fails there with a client-side "not found" even though the aggregator listed it. If that happens, do not retry the typed name in that conversation: call `invoke_tool` with the same arguments. The typed tools are already in the session's list and should be callable at the start of your next conversation. Clients that honor `list_changed` mid-conversation can call the typed tools immediately.
+
+The same discovery data is available via the REST API. Start with `GET /api` to get aggregator info and links, then use the REST endpoints listed in the Tool Reference table below. Typed tools are MCP-only; REST callers use the invoke endpoint.
 
 ## Tool Reference
 
 | MCP Tool | REST Endpoint | Purpose |
 |----------|--------------|---------|
-| `list_services` | `GET /api/services` | Index of all servers and their tools |
-| `get_service_details` | `GET /api/services/{name}` | Full tool schemas and prompt templates for a server |
+| `find_tools` | — | Search every server for tools; returns typed names and schemas, activates them in `Lazy` mode |
+| `{server}__{tool}` | — | Typed wrapper for one downstream tool; takes that tool's own parameters |
+| `list_services` | `GET /api/services` | Index of all servers, their tools and each tool's `wrapperName` |
+| `get_service_details` | `GET /api/services/{name}` | Full tool schemas and prompt templates for a server; activates its typed tools in `Lazy` mode |
 | `get_service_skill` | `GET /api/services/{name}/skill` | Skill/usage guide for a server |
-| `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Proxy a tool call to a downstream server |
-| `get_prompt` | `GET /api/services/{name}/prompts/{prompt}` | Retrieve a rendered prompt template from a downstream server |
+| `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Escape hatch: proxy a tool call with a stringified JSON argument object |
+| `get_prompt` | — | Escape hatch: retrieve a rendered prompt template from a downstream server (MCP only) |
+| `refresh_service` | — | Drop cached connection, tools and prompts for a server and rebuild its typed tools |
+| `show_admin_tools` | — | Add the administrative tools to your tool list (hidden by default in `Lazy` mode) |
 | `enable_service` | `POST /api/admin/services/{name}/enable` | Enable a disabled server, allowing tool invocations |
 | `disable_service` | `POST /api/admin/services/{name}/disable` | Disable a server, preventing tool invocations |
 | `register_server` | `POST /api/admin/services` | Register a new downstream server |
@@ -37,16 +47,34 @@ The same workflow applies via the REST API. Start with `GET /api` to get aggrega
 
 The REST API entry point is `GET /api`, which returns aggregator info and links to all endpoints.
 
-## Calling invoke_tool
+## Calling typed wrapper tools
 
-Pass `arguments` as a JSON object with the tool's expected parameters.
+Typed tools are named `{server}__{tool}` and take exactly the downstream tool's parameters. Get the name and schema from `find_tools`, `list_services` (`wrapperName`) or `get_service_details`.
+
+**Example:**
+```
+find_tools(query: "docs search")
+  → matches: [{ tool: "microsoft-learn__microsoft_docs_search", server: "microsoft-learn",
+                inputSchema: { properties: { query: { type: "string" } }, required: ["query"] }, activated: true }]
+
+microsoft-learn__microsoft_docs_search(query: "dependency injection in ASP.NET Core")
+```
+
+- A typed tool called without one of its required parameters returns an error naming the parameter and embedding the schema; the downstream is not contacted. Re-invoke with the missing parameter.
+- `list_services` includes the aggregator itself (`id: "self"`) so this guide is discoverable via `get_service_skill`. Its `tools` are the aggregator's own tools, called directly by name; `invoke_tool` only reaches real downstreams.
+- Each server has an immutable `id` (in `list_services`, `get_service_details`, `find_tools`). Typed tool names follow the server *name*; if a server is unregistered and re-registered under a new name, its typed tools change and its `id` changes. If a stored typed name stops existing, run `find_tools` again.
+- `WrapperMode` on the aggregator is `Lazy` (typed tools appear in **your** tool list after you call `find_tools` / `get_service_details`, and the aggregator sends you `tools/list_changed`; other clients' lists are unaffected) or `Eager` (all typed tools are always listed). In either mode the aggregator accepts a typed tool by name as soon as you know it, listed or not; whether your client lets the call out is the *Client capability* question above. `find_tools` reports the mode.
+
+## Calling invoke_tool (fallback)
+
+Use `invoke_tool` when your client will not let you call the typed tool (see *Client capability*). Pass `arguments` as a JSON object **encoded as a string** with the tool's expected parameters.
 
 **Example:**
 ```
 invoke_tool(
   serverName: "microsoft-learn",
   toolName: "microsoft_docs_search",
-  arguments: {"query": "dependency injection in ASP.NET Core"}
+  arguments: "{\"query\": \"dependency injection in ASP.NET Core\"}"
 )
 ```
 
@@ -79,9 +107,12 @@ Content-Type: application/json
 
 ## Error Handling
 
-- **Server unavailable:** If a server is disabled (via `disable_service`) or cannot be reached, `invoke_tool` calls will fail with "Server '{name}' is unavailable." Check `list_services` to see the server's enabled status.
+- **Server unavailable:** If a server is disabled (via `disable_service`) or cannot be reached, typed tool and `invoke_tool` calls return an error result "Server '{name}' is unavailable." Check `list_services` to see the server's enabled status. In `Eager` mode a disabled server's typed tools are removed from the tool list.
+- **Missing parameter:** A typed tool called without a required parameter returns an error naming it. `invoke_tool` errors on argument mismatches attach the missing/unknown keys and the schema.
+- **Typed tool rejected by your client ("not found" before any aggregator response):** your client's tool index has not refreshed. Do not retry the typed name in this conversation; call `invoke_tool(serverName, toolName, arguments)` with the same arguments.
+- **Unknown typed tool (aggregator error result):** the aggregator accepts any existing `{server}__{tool}` name whether or not it is in your list, and lists it for your session afterwards. A name that does not exist returns an error result that says why: the server was renamed or removed (with the registered server names), the server is disabled, or the server has no such tool (with its actual tool names). Run `find_tools` again.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
-- **Slow first call:** Connections to downstream servers are lazy. The first `invoke_tool` call to a server may take longer as the connection is established. Subsequent calls will be faster.
+- **Slow first call:** Connections to downstream servers are lazy. The first call to a server may take longer as the connection is established. Subsequent calls will be faster.
 ## Tips
 
 - The `list_services` descriptions are AI-generated summaries written for AI consumers — they use precise technical language to help with routing decisions. Summaries are generated from the server's full capability set (tools and prompt templates) at registration time. If a server's capabilities change significantly, use `regenerate_summary` to refresh the summary.
@@ -96,14 +127,14 @@ Servers can be temporarily disabled without unregistering them. This is useful w
 **Disabling a server:**
 - Use `disable_service(serverName)` to disable a registered server
 - The server's connection is immediately closed
-- All subsequent `invoke_tool` calls to this server will fail with "Server is unavailable"
+- Its typed `{server}__{tool}` tools are removed from the tool list, and any call to it fails with "Server is unavailable"
 - The server remains registered and all its configuration, skill docs, and metadata are preserved
 - The disabled state persists across aggregator restarts
 
 **Enabling a server:**
 - Use `enable_service(serverName)` to re-enable a disabled server
-- The server will be available for tool invocations again
-- A new connection will be established on the next `invoke_tool` call
+- The server will be available for tool invocations again, and its typed tools come back (immediately in `Eager` mode, on the next `find_tools` / `get_service_details` in `Lazy` mode)
+- A new connection will be established on the next call
 
 **When to use:**
 - Temporarily disable a server that is returning errors or timing out
@@ -125,7 +156,7 @@ Use `register_server` to add new downstream servers at runtime:
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `name` | Yes | Unique identifier for the server |
+| `name` | Yes | Unique identifier for the server. Becomes the prefix of its typed tools (`{name}__{tool}`), so it must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` and cannot contain `__`. |
 | `transportType` | Yes | `"Stdio"` or `"Http"`. Stdio servers must be installed and executable on the machine running the aggregator. |
 | `endpoint` | Yes | For Stdio: the command to run; for Http: the server URL. **The URL must be reachable from the aggregator's network**, not the client's — use cluster-internal DNS for k8s co-located servers. |
 | `arguments` | Stdio only | JSON array of command arguments |
@@ -160,8 +191,9 @@ The transport is replaced wholesale, not merged — omitting `headers` on an upd
 `GET /api/admin/services/{name}` first if you need to preserve unrelated fields (header *values*
 come back masked, so re-supply them from their source).
 
-Any live connection to the server is dropped on update, so the next `invoke_tool` call reconnects
-with the new configuration.
+Any live connection to the server is dropped on update, so the next call reconnects with the new
+configuration. A transport change also rebuilds the server's typed tools from whatever the new
+transport serves.
 
 **Example — rotating a token:**
 ```

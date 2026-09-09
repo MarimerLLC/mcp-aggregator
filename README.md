@@ -9,6 +9,7 @@ As MCP adoption grows, AI-powered tools like Claude Code, Cursor, and Copilot ea
 MCP Aggregator solves this by acting as a single gateway:
 
 - **One connection, many servers** — your AI tool connects to the aggregator; the aggregator manages connections to all downstream MCP servers.
+- **Typed wrapper tools** — every downstream tool is exposed as a first-class tool named `{server}__{tool}` with the downstream's own input schema, so models call `microsoft-learn__microsoft_docs_search(query: "...")` instead of authoring a stringified JSON blob. `find_tools` searches across every server.
 - **Lazy loading** — downstream servers are connected on first use, not at startup. Idle connections are automatically cleaned up.
 - **Dynamic registration** — add or remove MCP servers at runtime without restarting. Changes are persisted to disk.
 - **Skill documents** — attach optional markdown guides to each server describing when and how to use its tools, giving LLMs better context.
@@ -148,10 +149,58 @@ a process environment variable with `${VAR}` syntax, so the registry file stays 
 ```
 
 1. An AI tool connects to the aggregator via MCP (stdio or HTTP/SSE).
-2. It calls `list_services` to get a concise index of all registered servers and their tools.
-3. It calls `get_service_details` to drill into a specific server's full tool schemas and prompt templates.
-4. It calls `invoke_tool` to proxy a tool call, or `get_prompt` to retrieve a rendered prompt template from the downstream server.
+2. It calls `find_tools` with what it needs ("send email", "docs search") and gets back matching typed tools with their exact names and input schemas. Or it browses: `list_services` for a concise index, `get_service_details` for a server's full schemas and prompt templates.
+3. It calls the typed tool directly, e.g. `microsoft-learn__microsoft_docs_search(query: "...")`. The call is proxied to the downstream server with timeout, retry and error hints handled by the aggregator.
+4. `invoke_tool` and `get_prompt` remain as escape hatches for the generic path.
 5. Idle downstream connections are automatically closed after a configurable timeout.
+
+### Typed wrapper tools
+
+Each downstream tool becomes a tool on the aggregator named `{server}__{tool}` — the registered
+server name, two underscores, the downstream tool name — carrying the downstream `inputSchema`
+unchanged. Two servers with the same tool name (say, two OneDrive servers with `list_files`) get
+two distinct wrappers. Calls flow through the same proxy as `invoke_tool`, so timeouts, retries,
+telemetry and the self-correcting argument hints are shared. A wrapper called without a required
+parameter returns an error naming the parameter without contacting the downstream.
+
+`WrapperMode` controls when wrappers appear in `tools/list`:
+
+| Mode | `tools/list` contains | Wrappers become callable when |
+|------|-----------------------|-------------------------------|
+| `Lazy` (default) | The consumer tools (8), plus whatever **this session** has activated | `find_tools` or `get_service_details` activates wrappers for the calling session, `show_admin_tools` activates the administrative tools, and the aggregator sends that session `notifications/tools/list_changed`; every tool is also callable by name whether or not it is listed |
+| `Eager` | Every aggregator tool and every tool of every enabled server | Always |
+
+Lazy activation is **per session** and is the aggregator's progressive disclosure. A session
+starts with eight consumer tools (`find_tools`, `list_services`, `get_service_details`,
+`get_service_skill`, `invoke_tool`, `get_prompt`, `refresh_service`, `show_admin_tools`), about
+5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
+drills into a server; the seven administrative tools (`register_server`, `update_server`,
+`unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`)
+join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
+list. A client that already knows a name (from `find_tools`, a skill document, an earlier
+session) can call it directly; the aggregator resolves it by name and, from then on, lists it for
+that session. Whether the *client* lets that call out is another matter: Claude Desktop chat
+re-fetches `tools/list` on `list_changed` but does not refresh the running conversation's tool
+index, so a wrapper activated mid-conversation is rejected client-side there and the model has
+to fall back to `invoke_tool` (the skill document and every runtime hint say so). `Lazy` is the
+default because Claude Desktop caps the total number of tools across all connected servers at
+roughly 44.
+
+Both hosts ship with `Lazy`. On the HTTP host, session handling follows the client's protocol
+revision (`McpAggregator:Http:SessionMode`, default `StatefulForInitializeClients`): a client that
+still uses the `initialize` handshake — Claude Desktop through mcp-remote, Claude Code, rockbot —
+gets a session with an `Mcp-Session-Id`, so its list can grow and `list_changed` reaches it. A
+2026-07-28 client is stateless, as that revision requires (it removed protocol sessions,
+SEP-2567): its `tools/list` is always the minimal set and it calls wrappers by name after
+`find_tools`. Set `WrapperMode` to `Eager` only for a client that cannot do either.
+
+Wrapper names track the registered server name. Unregistering and re-registering a server under a
+new name removes the old wrappers and adds new ones, and the server's immutable `id` (shown in
+`list_services`, `get_service_details` and `find_tools`) changes, so stale references fail
+visibly. Server names must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` and cannot contain `__`.
+
+The design, the rockbot #420 question-by-question answers, and the pending measurement template
+live in [docs/typed-wrapper-tools.md](docs/typed-wrapper-tools.md).
 
 ### Self-Describing Skill
 
@@ -163,12 +212,18 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 
 | Tool | Description |
 |------|-------------|
-| `list_services` | Concise index of all registered servers with tool names and descriptions |
-| `get_service_details` | Full tool schemas and prompt templates for a specific server |
+| `find_tools` | Search every registered server for tools matching a query; returns typed tool names and schemas, and activates them for this session in `Lazy` mode |
+| `{server}__{tool}` | One typed wrapper per downstream tool, carrying the downstream input schema |
+| `show_admin_tools` | Add the administrative tools below to this session's tool list (`Lazy` mode hides them by default) |
+| `list_services` | Concise index of all registered servers with tool names, wrapper names and descriptions |
+| `get_service_details` | Full tool schemas and prompt templates for a specific server; activates its wrappers in `Lazy` mode |
 | `get_service_skill` | Retrieve a server's skill document (markdown guide) |
-| `invoke_tool` | Proxy a tool call to a downstream server |
-| `get_prompt` | Retrieve a rendered prompt template from a downstream server |
-| `register_server` | Register a new downstream MCP server |
+| `invoke_tool` | Escape hatch: proxy a tool call to a downstream server with a stringified JSON argument object |
+| `get_prompt` | Escape hatch: retrieve a rendered prompt template from a downstream server |
+| `refresh_service` | Drop cached connection, tool and prompt lists for a server and rebuild its wrappers |
+| `enable_service` | Admin: enable a registered server (its wrappers reappear) |
+| `disable_service` | Admin: disable a registered server (its wrappers are removed) |
+| `register_server` | Admin: register a new downstream MCP server |
 | `unregister_server` | Remove a registered server |
 | `update_server` | Update a registered server's transport configuration or metadata |
 | `update_skill` | Set or update a server's skill document |
@@ -210,7 +265,8 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
     "SkillsDirectory": "skills",
     "IndexCacheTtl": "00:05:00",
     "ConnectionIdleTimeout": "00:30:00",
-    "DefaultToolTimeout": "00:00:30"
+    "DefaultToolTimeout": "00:00:30",
+    "WrapperMode": "Lazy"
   }
 }
 ```
@@ -223,6 +279,8 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `IndexCacheTtl` | 5 minutes | How long to cache the service index |
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
+| `Http:SessionMode` | `StatefulForInitializeClients` | HTTP host only: `Stateless`, `Stateful`, or sessions only for clients that use the legacy `initialize` handshake |
+| `WrapperMode` | `Lazy` | When typed `{server}__{tool}` wrappers appear in `tools/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
 | `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
 | `SelfDescription` | *(built-in)* | Description shown for the aggregator in the service index |
 
@@ -390,7 +448,7 @@ data/
 ## Tech Stack
 
 - [.NET 10](https://dotnet.microsoft.com/) / ASP.NET Core
-- [Model Context Protocol SDK](https://github.com/modelcontextprotocol/csharp-sdk) 0.8.0-preview.1
+- [Model Context Protocol SDK](https://github.com/modelcontextprotocol/csharp-sdk) 2.2.0
 - [Serilog](https://serilog.net/) + [OpenTelemetry](https://opentelemetry.io/) for observability
 - [Scalar](https://scalar.com/) for interactive API documentation
 

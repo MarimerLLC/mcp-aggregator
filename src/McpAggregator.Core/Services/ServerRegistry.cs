@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
@@ -8,8 +9,16 @@ using Microsoft.Extensions.Options;
 
 namespace McpAggregator.Core.Services;
 
-public class ServerRegistry
+public partial class ServerRegistry
 {
+    /// <summary>
+    /// Server names become the prefix of every typed wrapper tool (<c>{server}__{tool}</c>), so
+    /// they must be valid tool-name material: SDK charset, no leading punctuation, and never the
+    /// <c>__</c> separator itself, which would make the wrapper name ambiguous to parse.
+    /// </summary>
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")]
+    private static partial Regex ValidServerName();
+
     private readonly ConcurrentDictionary<string, RegisteredServer> _servers = new(StringComparer.OrdinalIgnoreCase);
     private readonly IRegistryPersistence _persistence;
     private readonly ILogger<ServerRegistry> _logger;
@@ -18,6 +27,9 @@ public class ServerRegistry
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     public event Action? RegistryChanged;
+
+    /// <summary>The aggregator's own name, which is never a downstream.</summary>
+    public string SelfName => _options.SelfName;
 
     public ServerRegistry(
         IRegistryPersistence persistence,
@@ -38,12 +50,26 @@ public class ServerRegistry
         {
             if (_loaded) return;
             var data = await _persistence.LoadAsync(ct);
+            var assignedIds = 0;
             foreach (var server in data.Servers)
             {
+                if (string.IsNullOrWhiteSpace(server.Id))
+                {
+                    server.Id = NewId();
+                    assignedIds++;
+                }
                 _servers[server.Name] = server;
             }
             _loaded = true;
             _logger.LogInformation("Loaded {Count} servers from registry", _servers.Count);
+
+            if (assignedIds > 0)
+            {
+                // Registry written before RegisteredServer.Id existed: persist the backfilled ids
+                // once so they stay stable across restarts.
+                await PersistAsync(ct);
+                _logger.LogInformation("Assigned ids to {Count} server(s) registered before ids existed", assignedIds);
+            }
         }
         finally
         {
@@ -70,7 +96,11 @@ public class ServerRegistry
 
     public async Task RegisterAsync(RegisteredServer server, CancellationToken ct = default)
     {
+        ValidateServerName(server.Name);
         ValidateTransportConfig(server.Transport);
+
+        if (string.IsNullOrWhiteSpace(server.Id))
+            server.Id = NewId();
 
         if (!_servers.TryAdd(server.Name, server))
             throw new ServerAlreadyExistsException(server.Name);
@@ -181,6 +211,29 @@ public class ServerRegistry
         server.Enabled = enabled;
         await PersistAsync(ct);
         _logger.LogInformation("Server '{Name}' {Status}", name, enabled ? "enabled" : "disabled");
+        // Enabling or disabling changes which wrapper tools exist, so it is a registry change.
+        RegistryChanged?.Invoke();
+    }
+
+    private static string NewId() => Guid.NewGuid().ToString("N")[..12];
+
+    private void ValidateServerName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new AggregatorException("Server name is required.");
+
+        if (name.Contains(Tools.WrapperNaming.Separator, StringComparison.Ordinal))
+            throw new AggregatorException(
+                $"Invalid server name '{name}': names cannot contain '{Tools.WrapperNaming.Separator}', " +
+                "which separates the server and tool parts of a wrapper tool name.");
+
+        if (!ValidServerName().IsMatch(name))
+            throw new AggregatorException(
+                $"Invalid server name '{name}': use 1-64 characters from [A-Za-z0-9_.-], starting with a letter or digit.");
+
+        if (string.Equals(name, _options.SelfName, StringComparison.OrdinalIgnoreCase))
+            throw new AggregatorException(
+                $"Invalid server name '{name}': that is the aggregator's own name.");
     }
 
     private async Task PersistAsync(CancellationToken ct)

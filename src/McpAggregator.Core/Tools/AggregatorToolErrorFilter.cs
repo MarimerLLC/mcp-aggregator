@@ -1,6 +1,9 @@
 using System.Text;
 using System.Text.Json;
+using McpAggregator.Core.Services;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -15,6 +18,13 @@ namespace McpAggregator.Core.Tools;
 /// <see cref="ArgumentException"/> down to "An error occurred invoking 'X'" and confines the detail
 /// to the server log, so a caller cannot see what to fix. This filter reports the specific mismatch
 /// and attaches the authoritative input schema instead.
+/// </para>
+/// <para>
+/// It also handles a <c>tools/call</c> for a name the server does not expose at all. With typed
+/// wrapper tools (issue #39) that is usually a stale tool list — a server renamed, a tool not yet
+/// activated in Lazy mode — so the bare SDK fault "Unknown tool: 'x'" is replaced with a hint from
+/// <see cref="WrapperToolCatalog.BuildUnknownToolHintAsync"/> that says what changed and how to
+/// recover (refresh the tool list, <c>find_tools</c>, <c>invoke_tool</c>).
 /// </para>
 /// <para>
 /// Note that the binding <see cref="ArgumentException"/> raised by the SDK carries
@@ -60,7 +70,64 @@ public static class AggregatorToolErrorFilter
                     Content = [new TextContentBlock { Text = hint }]
                 };
             }
+            catch (McpProtocolException ex) when (
+                ex.ErrorCode == McpErrorCode.InvalidParams
+                && request.MatchedPrimitive is null
+                && request.Params?.Name is { Length: > 0 } unknownName
+                && !ct.IsCancellationRequested)
+            {
+                // The SDK matched no tool. Explain rather than fault: the catalog knows whether the
+                // server was renamed, is disabled, lacks the tool, or the wrapper just was not
+                // activated yet (and activates it). Without a catalog (a bare test server) fall
+                // back to a static hint.
+                var hint = await BuildUnknownToolHintAsync(request, unknownName, logger, ct);
+
+                logger.LogWarning("Unknown tool '{Tool}' requested: {Error}", unknownName, ex.Message);
+
+                return new CallToolResult
+                {
+                    IsError = true,
+                    Content = [new TextContentBlock { Text = hint }]
+                };
+            }
         };
+    }
+
+    private static async ValueTask<string> BuildUnknownToolHintAsync(
+        RequestContext<CallToolRequestParams> request,
+        string toolName,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+        if (catalog is not null)
+        {
+            try
+            {
+                return await catalog.BuildUnknownToolHintAsync(toolName, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogDebug(ex, "Failed to build unknown-tool hint for '{Tool}'", toolName);
+            }
+        }
+
+        return BuildUnknownToolFallbackHint(toolName);
+    }
+
+    /// <summary>The hint used when no <see cref="WrapperToolCatalog"/> is available to consult.</summary>
+    internal static string BuildUnknownToolFallbackHint(string toolName)
+    {
+        if (WrapperNaming.TryParse(toolName, out var server, out var tool))
+        {
+            return $"Unknown tool '{toolName}'. Typed tools are named '{{server}}{WrapperNaming.Separator}{{tool}}' and your " +
+                   "tool list may be out of date (the server may have been renamed, disabled, or its tools not activated yet). " +
+                   $"Call find_tools(query: \"{tool}\") for the current name and schema, refresh your tool list, " +
+                   $"or use invoke_tool(serverName: \"{server}\", toolName: \"{tool}\", arguments: <JSON object as a string>).";
+        }
+
+        return $"Unknown tool '{toolName}'. Downstream tools are typed tools named '{{server}}{WrapperNaming.Separator}{{tool}}'; " +
+               $"call find_tools(query: \"{toolName}\") to get current tool names and schemas, or list_services to browse servers.";
     }
 
     /// <summary>

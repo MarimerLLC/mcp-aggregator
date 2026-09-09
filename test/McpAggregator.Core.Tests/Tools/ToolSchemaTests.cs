@@ -32,7 +32,9 @@ public class ToolSchemaTests
     {
         using var provider = BuildProvider();
 
+        // Consumer tools come from the assembly scan; admin tools are built by AdminToolSet.
         var tool = provider.GetServices<McpServerTool>()
+            .Concat(provider.GetRequiredService<AdminToolSet>().Tools)
             .FirstOrDefault(t => t.ProtocolTool.Name == toolName);
 
         Assert.IsNotNull(tool, $"Tool '{toolName}' was not discovered from the Core assembly.");
@@ -106,6 +108,18 @@ public class ToolSchemaTests
     {
         AssertOptional("invoke_tool", "arguments");
         AssertRequired("invoke_tool", "serverName", "toolName");
+    }
+
+    [TestMethod]
+    public void FindTools_LimitIsOptional()
+    {
+        // The description says "(default 10)" — the schema must agree, and the DI-injected
+        // catalog must not leak into the parameters.
+        AssertOptional("find_tools", "limit");
+        AssertRequired("find_tools", "query");
+
+        var (properties, _) = GetSchema("find_tools");
+        CollectionAssert.DoesNotContain(properties, "catalog");
     }
 
     [TestMethod]

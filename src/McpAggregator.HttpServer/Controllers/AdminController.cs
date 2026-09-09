@@ -104,6 +104,7 @@ public class AdminController : ControllerBase
 
         return Ok(new
         {
+            server.Id,
             server.Name,
             server.DisplayName,
             server.Description,
@@ -127,8 +128,11 @@ public class AdminController : ControllerBase
         await _registry.EnsureLoadedAsync(ct);
         await _registry.UpdateServerAsync(name, request.Transport, request.DisplayName, request.Description, ct);
 
-        // Drop any live connection so the next call reconnects with the new configuration.
+        // Drop any live connection so the next call reconnects with the new configuration, and the
+        // cached schemas so the typed wrapper tools are rebuilt from whatever the new transport serves.
         await _connectionManager.DisconnectAsync(name);
+        if (request.Transport is not null)
+            _toolIndex.InvalidateCache(name);
 
         return Ok(new { message = $"Server '{name}' updated." });
     }

@@ -29,12 +29,36 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     /// install request filters or other server-side behavior.
     /// </param>
     public InMemoryMcpServer(string name, Action<McpServerOptions>? configureOptions, params McpServerTool[] tools)
+        : this(name, BuildOptions(name, configureOptions, tools), services: null)
+    {
+    }
+
+    private InMemoryMcpServer(string name, McpServerOptions options, IServiceProvider? services)
     {
         _serverTransport = new StreamServerTransport(
             _clientToServer.Reader.AsStream(),
             _serverToClient.Writer.AsStream(),
             name);
 
+        _server = McpServer.Create(_serverTransport, options, loggerFactory: null, serviceProvider: services);
+        _runTask = _server.RunAsync(_cts.Token);
+
+        ClientTransport = new StreamClientTransport(
+            serverInput: _clientToServer.Writer.AsStream(),
+            serverOutput: _serverToClient.Reader.AsStream());
+    }
+
+    /// <summary>
+    /// Hosts an existing <see cref="McpServerOptions"/> instance — typically the DI-built one from
+    /// <c>IOptions&lt;McpServerOptions&gt;</c>, so the test server shares the live
+    /// <see cref="McpServerOptions.ToolCollection"/> with the code under test. Tools that take
+    /// DI-injected parameters resolve them from <paramref name="services"/>.
+    /// </summary>
+    public static InMemoryMcpServer Host(string name, McpServerOptions options, IServiceProvider? services = null)
+        => new(name, options, services);
+
+    private static McpServerOptions BuildOptions(string name, Action<McpServerOptions>? configureOptions, McpServerTool[] tools)
+    {
         var toolCollection = new McpServerPrimitiveCollection<McpServerTool>();
         foreach (var tool in tools)
             toolCollection.Add(tool);
@@ -46,33 +70,36 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
         };
 
         configureOptions?.Invoke(options);
-
-        _server = McpServer.Create(_serverTransport, options);
-        _runTask = _server.RunAsync(_cts.Token);
-
-        ClientTransport = new StreamClientTransport(
-            serverInput: _clientToServer.Writer.AsStream(),
-            serverOutput: _serverToClient.Reader.AsStream());
+        return options;
     }
 
     /// <summary>Transport a client (or <c>ConnectionManager.TransportFactoryOverride</c>) connects with.</summary>
     public IClientTransport ClientTransport { get; }
 
+    /// <summary>The server-side session object — what the aggregator keys per-session state by.</summary>
+    public McpServer Server => _server;
+
     public Task<McpClient> CreateClientAsync(CancellationToken ct = default)
         => McpClient.CreateAsync(ClientTransport, cancellationToken: ct);
 
+    public Task<McpClient> CreateClientAsync(McpClientOptions options, CancellationToken ct = default)
+        => McpClient.CreateAsync(ClientTransport, options, cancellationToken: ct);
+
     public async ValueTask DisposeAsync()
     {
-        await _cts.CancelAsync();
+        // Cancellation runs the server's registered callbacks inline; a session that never saw a
+        // client can throw from them. Teardown does not care.
+        try { await _cts.CancelAsync(); }
+        catch (Exception) { }
 
         // Completing both pipes unblocks the transport's pending reads so RunAsync can finish.
         await _clientToServer.Writer.CompleteAsync();
         await _serverToClient.Writer.CompleteAsync();
 
+        // A session that no client ever connected to can fault on shutdown; none of it matters
+        // to a test that is tearing down.
         try { await _runTask.WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch (OperationCanceledException) { }
-        catch (TimeoutException) { }
-        catch (IOException) { }
+        catch (Exception) { }
 
         await _server.DisposeAsync();
         await _serverTransport.DisposeAsync();

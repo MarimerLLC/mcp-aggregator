@@ -6,6 +6,7 @@ using McpAggregator.Core.Tools;
 using McpAggregator.HttpServer.Middleware;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol.AspNetCore;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -103,9 +104,16 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
             });
         }
 
-        // MCP server with stateless HTTP transport (no SSE sessions)
+        // MCP over Streamable HTTP. The 2026-07-28 revision removed protocol sessions
+        // (SEP-2567): 2026 clients are stateless and call typed tools by name after find_tools.
+        // Clients that still use the initialize handshake — Claude Desktop through mcp-remote,
+        // Claude Code, rockbot — only call tools they have listed, and the only way their list can
+        // grow is a session that receives tools/list_changed. StatefulForInitializeClients gives
+        // exactly those clients a session and everyone else stateless requests.
+        var sessionMode = builder.Configuration.GetValue<HttpServerSessionMode?>("McpAggregator:Http:SessionMode")
+            ?? HttpServerSessionMode.StatefulForInitializeClients;
         builder.Services.AddAggregatorMcpServer()
-            .WithHttpTransport(options => options.Stateless = true)
+            .WithHttpTransport(options => options.SessionMode = sessionMode)
             .WithToolsFromAssembly(typeof(ConsumerTools).Assembly);
 
         // REST API + OpenAPI

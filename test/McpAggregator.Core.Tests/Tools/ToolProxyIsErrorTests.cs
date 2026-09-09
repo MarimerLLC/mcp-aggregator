@@ -65,6 +65,7 @@ public class ToolProxyIsErrorTests
 
     private sealed record Harness(
         ToolProxyHandler Proxy,
+        ServerRegistry Registry,
         ConnectionManager Connections,
         InMemoryMcpServer Downstream) : IAsyncDisposable
     {
@@ -115,7 +116,7 @@ public class ToolProxyIsErrorTests
         var proxy = new ToolProxyHandler(connections, toolIndex, options,
             TestHelpers.NullLoggerOf<ToolProxyHandler>());
 
-        return new Harness(proxy, connections, downstream);
+        return new Harness(proxy, registry, connections, downstream);
     }
 
     private static CancellationToken TestTimeout => new CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
@@ -123,7 +124,48 @@ public class ToolProxyIsErrorTests
     private static string TextOf(CallToolResult result)
         => string.Join("\n", result.Content.OfType<TextContentBlock>().Select(b => b.Text));
 
+    // ---------------------------------------------------------------- doubles for type mismatches
+
+    [SysDescription("Sends an email. Never fails once bound.")]
+    private static CallToolResult SendEmail(
+        [SysDescription("Recipients")] string[] to,
+        [SysDescription("Subject")] string subject)
+        => new() { IsError = false, Content = [new TextContentBlock { Text = $"sent to {string.Join(",", to)}: {subject}" }] };
+
     // ---------------------------------------------------------------- tests
+
+    [TestMethod]
+    public async Task InvokeAsync_ValueOfWrongType_AttachesTheSchemaHint()
+    {
+        // The small-model slip from the measurement runs: every key present, but 'to' sent as a
+        // string where the schema wants an array. The downstream SDK sanitizes that to "An error
+        // occurred invoking 'send_email'.", which names nothing; the proxy must add the schema.
+        var tool = McpServerTool.Create(SendEmail, new McpServerToolCreateOptions { Name = "send_email" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "send_email", """{"to":"alice@example.com","subject":"Lunch"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "a supplied value did not match its declared type");
+        StringAssert.Contains(text, "\"type\":\"array\"", "The schema must be attached so the caller can fix the shape.");
+    }
+
+    [TestMethod]
+    public async Task InvokeAsync_SchemaValidArgumentsWithAGenuineToolError_GetsNoHint()
+    {
+        // Regression guard: a tool-side failure on well-formed arguments must not be re-described
+        // as an argument problem.
+        var tool = McpServerTool.Create(FailingListFiles, new McpServerToolCreateOptions { Name = "list_files" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "list_files", """{"folder":"/Documents"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        Assert.IsFalse(TextOf(result).Contains("Argument mismatch"), TextOf(result));
+    }
 
     [TestMethod]
     public async Task InvokeAsync_DownstreamReturnsIsError_PreservesFlag()
@@ -186,9 +228,10 @@ public class ToolProxyIsErrorTests
         await using var harness = await CreateHarnessAsync(downstreamTool);
 
         var proxy = harness.Proxy;
+        var registry = harness.Registry;
         var invokeTool = McpServerTool.Create(
             (string serverName, string toolName, string? arguments, CancellationToken ct)
-                => ConsumerTools.InvokeTool(proxy, serverName, toolName, arguments, ct),
+                => ConsumerTools.InvokeTool(proxy, registry, serverName, toolName, arguments, ct),
             new McpServerToolCreateOptions { Name = "invoke_tool" });
 
         await using var aggregator = new InMemoryMcpServer("mcp-aggregator", invokeTool);
@@ -203,6 +246,25 @@ public class ToolProxyIsErrorTests
 
         Assert.IsTrue(result.IsError ?? false, "isError must survive the invoke_tool MCP hop.");
         StringAssert.Contains(TextOf(result), GraphError, "Original error text must survive.");
+    }
+
+    [TestMethod]
+    public async Task InvokeTool_AgainstTheAggregatorItself_SaysToCallTheToolDirectly()
+    {
+        // Seen on Claude Desktop: list_services advertises the aggregator as a service, so after
+        // show_admin_tools the model tried invoke_tool(serverName: "mcp-aggregator", toolName:
+        // "update_skill"). The answer must redirect, not just say "unknown server".
+        await using var harness = await CreateHarnessAsync();
+
+        var result = await ConsumerTools.InvokeTool(harness.Proxy, harness.Registry,
+            "MCP-Aggregator", "update_skill", "{\"serverName\":\"adjutant\"}", CancellationToken.None);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "is this aggregator");
+        StringAssert.Contains(text, "Call 'update_skill' directly");
+        StringAssert.Contains(text, "show_admin_tools");
+        Assert.IsFalse(text.Contains("Registered servers"), "Must not fall through to the unknown-server hint.");
     }
 
     [TestMethod]

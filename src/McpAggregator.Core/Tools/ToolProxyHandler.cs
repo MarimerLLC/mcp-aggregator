@@ -11,6 +11,18 @@ using ModelContextProtocol.Protocol;
 
 namespace McpAggregator.Core.Tools;
 
+/// <summary>
+/// Values of the <c>via</c> telemetry tag: which aggregator surface a downstream call came through.
+/// </summary>
+public static class InvocationPath
+{
+    /// <summary>The generic <c>invoke_tool</c> proxy (or the REST invoke endpoint).</summary>
+    public const string InvokeTool = "invoke_tool";
+
+    /// <summary>A typed <c>{server}__{tool}</c> wrapper tool.</summary>
+    public const string Wrapper = "wrapper";
+}
+
 public class ToolProxyHandler
 {
     private readonly ConnectionManager _connectionManager;
@@ -53,13 +65,17 @@ public class ToolProxyHandler
     /// <summary>
     /// When a tool call comes back as an error, checks the supplied arguments against the
     /// downstream tool's input schema. Returns a corrective message (listing the missing/unknown
-    /// keys and the full schema) only when there is an actual argument mismatch — genuine tool-side
-    /// errors on schema-valid arguments are left untouched. Returns null when no hint applies.
+    /// keys and the full schema) when there is an actual argument mismatch, or when the keys all
+    /// match but the downstream's error reads like an argument-binding failure (a value of the
+    /// wrong type — a string where the schema wants an array is the classic small-model slip).
+    /// Genuine tool-side errors on schema-valid arguments are left untouched. Returns null when no
+    /// hint applies.
     /// </summary>
     private async Task<string?> TryBuildArgumentHintAsync(
         string serverName,
         string toolName,
         IReadOnlyDictionary<string, object?>? providedArgs,
+        string errorText,
         CancellationToken ct)
     {
         try
@@ -86,7 +102,8 @@ public class ToolProxyHandler
                 ? providedKeys.Where(k => !propertyNames.Contains(k, StringComparer.Ordinal)).ToList()
                 : [];
 
-            if (missingRequired.Count == 0 && unknownKeys.Count == 0)
+            var keysMatch = missingRequired.Count == 0 && unknownKeys.Count == 0;
+            if (keysMatch && !LooksLikeBindingFailure(errorText))
                 return null;
 
             var schemaText = JsonSerializer.Serialize(schema, SchemaHintJsonOptions);
@@ -97,6 +114,8 @@ public class ToolProxyHandler
                 sb.Append("Missing required parameter(s): [").Append(string.Join(", ", missingRequired)).Append("]. ");
             if (unknownKeys.Count > 0)
                 sb.Append("Unrecognized argument key(s): [").Append(string.Join(", ", unknownKeys)).Append("]. ");
+            if (keysMatch)
+                sb.Append("Every key matched the schema, so a supplied value did not match its declared type (for example a string where an array is required). ");
             if (providedKeys.Count > 0)
                 sb.Append("You sent: [").Append(string.Join(", ", providedKeys)).Append("]. ");
             sb.Append("Re-invoke with arguments matching this input schema: ").Append(schemaText);
@@ -132,7 +151,15 @@ public class ToolProxyHandler
                 ? string.Join(", ", tools.Select(t => t.Name).Order(StringComparer.Ordinal))
                 : "(none)";
 
-            return $"Unknown tool '{toolName}' on server '{serverName}'. " +
+            // A common slip once typed wrappers exist: passing the '{server}__{tool}' name as the
+            // downstream toolName. Say so, and name the downstream tool it maps to.
+            var wrapperSlip = WrapperNaming.TryParse(toolName, out var prefix, out var downstreamName)
+                && string.Equals(prefix, serverName, StringComparison.OrdinalIgnoreCase)
+                && tools.Any(t => string.Equals(t.Name, downstreamName, StringComparison.Ordinal))
+                ? $"'{toolName}' is the typed tool name; call it directly as a tool, or pass toolName: \"{downstreamName}\" here. "
+                : string.Empty;
+
+            return $"Unknown tool '{toolName}' on server '{serverName}'. {wrapperSlip}" +
                    $"Available tools: [{available}]. " +
                    $"Re-invoke with one of those names, or call get_service_details(serverName: \"{serverName}\") " +
                    $"for their input schemas. Underlying error: {cause.Message}";
@@ -144,7 +171,18 @@ public class ToolProxyHandler
         }
     }
 
-    private static object? ConvertJsonElement(JsonElement element)
+    /// <summary>
+    /// The C# SDK reports a downstream binding failure as "An error occurred invoking '{tool}'."
+    /// with the detail confined to the server log; other SDKs say "invalid arguments" or
+    /// "validation". None of them name the parameter, which is why the schema is attached.
+    /// </summary>
+    private static bool LooksLikeBindingFailure(string errorText)
+        => errorText.Contains("An error occurred invoking", StringComparison.OrdinalIgnoreCase)
+           || errorText.Contains("invalid argument", StringComparison.OrdinalIgnoreCase)
+           || errorText.Contains("invalid params", StringComparison.OrdinalIgnoreCase)
+           || errorText.Contains("validation", StringComparison.OrdinalIgnoreCase);
+
+    internal static object? ConvertJsonElement(JsonElement element)
     {
         return element.ValueKind switch
         {
@@ -162,6 +200,10 @@ public class ToolProxyHandler
         };
     }
 
+    /// <summary>
+    /// Generic proxy path used by <c>invoke_tool</c> and the REST invoke endpoint: parses the
+    /// stringified JSON argument object, then shares everything else with the typed-wrapper path.
+    /// </summary>
     public async Task<CallToolResult> InvokeAsync(
         string serverName,
         string toolName,
@@ -178,7 +220,27 @@ public class ToolProxyHandler
             }
         }
 
-        _logger.LogInformation("Invoking tool '{Tool}' on '{Server}'", toolName, serverName);
+        return await InvokeAsync(serverName, toolName, args, InvocationPath.InvokeTool, ct);
+    }
+
+    /// <summary>
+    /// The single downstream call path. Timeout, retry, telemetry, the argument-schema hint on a
+    /// downstream <c>isError</c>, the unknown-tool hint, and <c>isError</c> propagation all live
+    /// here so the generic <c>invoke_tool</c> proxy and the typed wrapper tools behave identically.
+    /// </summary>
+    /// <param name="via">
+    /// Which surface the call arrived through — one of the <see cref="InvocationPath"/> constants.
+    /// Recorded as the <c>via</c> tag on the invocation metric and activity so reliability can be
+    /// compared between the two paths.
+    /// </param>
+    public async Task<CallToolResult> InvokeAsync(
+        string serverName,
+        string toolName,
+        IReadOnlyDictionary<string, object?>? args,
+        string via,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation("Invoking tool '{Tool}' on '{Server}' via {Via}", toolName, serverName, via);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(_options.DefaultToolTimeout);
@@ -186,6 +248,7 @@ public class ToolProxyHandler
         using var activity = AggregatorTelemetry.ActivitySource.StartActivity("mcp.tool_invoke");
         activity?.SetTag("server_name", serverName);
         activity?.SetTag("tool_name", toolName);
+        activity?.SetTag("via", via);
 
         var sw = Stopwatch.StartNew();
         // Pessimistic default; success path overwrites before returning.
@@ -208,10 +271,12 @@ public class ToolProxyHandler
                 // SDKs sanitize the binding error to a generic message, so attach the authoritative
                 // schema and the specific mismatch so the model can retry without a separate
                 // get_service_details round-trip.
-                var hint = await TryBuildArgumentHintAsync(serverName, toolName, args, ct);
+                var hint = await TryBuildArgumentHintAsync(serverName, toolName, args, errorText, ct);
                 if (hint is not null)
                 {
-                    result.Content = [.. result.Content, new TextContentBlock { Text = hint }];
+                    // Clients render content blocks back to back with no separator, so the
+                    // hint carries its own paragraph break.
+                    result.Content = [.. result.Content, new TextContentBlock { Text = "\n\n" + hint }];
                     _logger.LogInformation(
                         "Attached argument-schema hint to error result for '{Tool}' on '{Server}'",
                         toolName, serverName);
@@ -265,11 +330,12 @@ public class ToolProxyHandler
             {
                 { "server_name", serverName },
                 { "tool_name", toolName },
-                { "result", resultLabel }
+                { "result", resultLabel },
+                { "via", via }
             };
             AggregatorTelemetry.ToolInvocations.Add(1, tags);
             AggregatorTelemetry.ToolInvocationDuration.Record(sw.Elapsed.TotalSeconds,
-                new TagList { { "server_name", serverName }, { "tool_name", toolName } });
+                new TagList { { "server_name", serverName }, { "tool_name", toolName }, { "via", via } });
         }
     }
 }
