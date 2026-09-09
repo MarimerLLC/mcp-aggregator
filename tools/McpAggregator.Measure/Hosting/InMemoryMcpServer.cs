@@ -46,6 +46,8 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
 
     public IClientTransport ClientTransport { get; }
 
+    public McpServer Server => _server;
+
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync();

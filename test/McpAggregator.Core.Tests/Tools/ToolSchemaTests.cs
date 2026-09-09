@@ -32,7 +32,9 @@ public class ToolSchemaTests
     {
         using var provider = BuildProvider();
 
+        // Consumer tools come from the assembly scan; admin tools are built by AdminToolSet.
         var tool = provider.GetServices<McpServerTool>()
+            .Concat(provider.GetRequiredService<AdminToolSet>().Tools)
             .FirstOrDefault(t => t.ProtocolTool.Name == toolName);
 
         Assert.IsNotNull(tool, $"Tool '{toolName}' was not discovered from the Core assembly.");

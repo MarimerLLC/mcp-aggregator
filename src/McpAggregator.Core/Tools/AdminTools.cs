@@ -7,9 +7,50 @@ using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Tools;
 
-[McpServerToolType]
+/// <summary>
+/// Tools that change what the aggregator is, rather than use it. Deliberately <b>not</b> marked
+/// <c>[McpServerToolType]</c>: <see cref="AdminToolSet"/> builds them so the SDK never adds them to
+/// the shared tool collection on its own. In <see cref="Configuration.WrapperToolMode.Lazy"/> mode
+/// they stay out of every session's initial <c>tools/list</c> and are disclosed per session by
+/// <c>show_admin_tools</c> (or by calling one by name); in Eager mode they are listed as usual.
+/// </summary>
 public class AdminTools
 {
+    /// <summary>
+    /// The names of every tool declared on this class plus the enable/disable pair. This is the
+    /// set <see cref="Services.WrapperToolCatalog"/> hides in Lazy mode; a test keeps it equal to
+    /// the <see cref="McpServerToolAttribute"/> names actually declared here.
+    /// </summary>
+    public static readonly IReadOnlySet<string> ToolNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "register_server", "update_server", "unregister_server", "update_skill", "regenerate_summary",
+        "enable_service", "disable_service",
+    };
+
+    [McpServerTool(Name = "enable_service")]
+    [Description("Enable a registered MCP server, allowing its tools to be invoked.")]
+    public static async Task<string> EnableService(
+        ServerRegistry registry,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        await registry.SetEnabledAsync(serverName, true, ct);
+        return $"Server '{serverName}' enabled.";
+    }
+
+    [McpServerTool(Name = "disable_service")]
+    [Description("Disable a registered MCP server, preventing its tools from being invoked.")]
+    public static async Task<string> DisableService(
+        ServerRegistry registry,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        await registry.SetEnabledAsync(serverName, false, ct);
+        return $"Server '{serverName}' disabled.";
+    }
+
     [McpServerTool(Name = "register_server")]
     [Description("Register a new downstream MCP server with the aggregator.")]
     public static async Task<string> RegisterServer(

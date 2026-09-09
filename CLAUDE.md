@@ -34,9 +34,14 @@ downstream `inputSchema` unchanged. `WrapperToolCatalog` (singleton, registered 
   `ToolIndex.ToolsChanged`; `WrapperSyncHostedService` runs the first sync after host start and then every
   `IndexCacheTtl`. The SDK sends `list_changed` from the collection's `Changed` event.
 - `Lazy`: the shared collection is **never** touched. Activation is per session: `find_tools` /
-  `get_service_details` record wrappers for the calling session, a `ListToolsHandler` appends that session's
-  wrappers to `tools/list`, a `CallToolHandler` fallback dispatches any wrapper by name (listed or not) and
-  activates it for that session, and the catalog sends that session `list_changed` itself. Session key:
+  `get_service_details` record wrappers for the calling session, `show_admin_tools` records the admin tools,
+  a `ListToolsHandler` appends that session's tools to `tools/list`, a `CallToolHandler` fallback dispatches
+  any wrapper or admin tool by name (listed or not) and activates it for that session, and the catalog sends
+  that session `list_changed` itself. `AdminTools` is deliberately not `[McpServerToolType]`; `AdminToolSet`
+  builds those tools outside the assembly scan so the SDK's per-request options setup never re-adds them,
+  and only Eager mode puts them in the shared collection. Never inject `WrapperToolCatalog` (or anything
+  depending on `IOptions<McpServerOptions>`) into `McpServerOptions` configuration — it deadlocks the
+  options pipeline. Session key:
   `McpServer.SessionId` when non-empty (stateful HTTP), else the `McpServerOptions` instance (one per stdio
   process; one per request on stateless HTTP, so nothing sticks there). `request.Server` is a fresh
   `DestinationBoundMcpServer` facade per request and must not be used as a key.
@@ -47,6 +52,10 @@ Both call paths go through `ToolProxyHandler.InvokeAsync(server, tool, args, via
 `McpServer` is not in DI. The handle the catalog uses is `IOptions<McpServerOptions>.Value.ToolCollection`;
 the SDK server reads it live per `tools/list` and (stateful transports only) subscribes to its `Changed`
 event. `DeferChangedEvents()` batches a sync into one `Changed` (none if nothing changed).
+
+The HTTP host uses `HttpServerSessionMode.StatefulForInitializeClients` (config `McpAggregator:Http:SessionMode`):
+legacy `initialize` clients get an `Mcp-Session-Id` session so `list_changed` and per-session lists work;
+2026-07-28 clients are stateless as SEP-2567 requires (protocol sessions were removed from that revision).
 
 **Stateless HTTP builds a fresh `McpServerOptions` per request via `IOptionsFactory`**, and the SDK's
 options setup does `ToolCollection ??= []` before adding the attributed tools. `AddAggregatorMcpServer`

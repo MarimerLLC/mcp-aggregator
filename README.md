@@ -167,21 +167,28 @@ parameter returns an error naming the parameter without contacting the downstrea
 
 | Mode | `tools/list` contains | Wrappers become callable when |
 |------|-----------------------|-------------------------------|
-| `Lazy` (default) | The aggregator's own tools, plus whatever **this session** has activated | `find_tools` or `get_service_details` activates them for the calling session and the aggregator sends that session `notifications/tools/list_changed`; any wrapper is also callable by name whether or not it is listed |
-| `Eager` | Every tool of every enabled server | Always |
+| `Lazy` (default) | The consumer tools (8), plus whatever **this session** has activated | `find_tools` or `get_service_details` activates wrappers for the calling session, `show_admin_tools` activates the administrative tools, and the aggregator sends that session `notifications/tools/list_changed`; every tool is also callable by name whether or not it is listed |
+| `Eager` | Every aggregator tool and every tool of every enabled server | Always |
 
-Lazy activation is **per session**. The point of the mode is to keep tool descriptions out of
-context windows that did not ask for them, so one client's `find_tools` never enlarges another
-client's `tools/list`. A client that learned a name (from `find_tools`, a skill document, an
-earlier session) can call it directly; the aggregator resolves it by name and, from then on, lists
-it for that session. `Lazy` is the default because Claude Desktop caps the total number of tools
-across all connected servers at roughly 44.
+Lazy activation is **per session** and is the aggregator's progressive disclosure. A session
+starts with eight consumer tools (`find_tools`, `list_services`, `get_service_details`,
+`get_service_skill`, `invoke_tool`, `get_prompt`, `refresh_service`, `show_admin_tools`), about
+5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
+drills into a server; the seven administrative tools (`register_server`, `update_server`,
+`unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`)
+join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
+list. A client that already knows a name (from `find_tools`, a skill document, an earlier
+session) can call it directly; the aggregator resolves it by name and, from then on, lists it for
+that session. `Lazy` is the default because Claude Desktop caps the total number of tools across
+all connected servers at roughly 44.
 
-Both hosts ship with `Lazy`. The HTTP host runs MCP over **stateless** HTTP, where every request
-is its own session: wrappers are never listed there (nothing carries over between requests) and
-are called by name after `find_tools`, which keeps `tools/list` at its minimum for every client.
-A host that refuses to call a tool it has not listed can only reach downstreams through
-`invoke_tool` on that endpoint; set `WrapperMode` to `Eager` for such clients.
+Both hosts ship with `Lazy`. On the HTTP host, session handling follows the client's protocol
+revision (`McpAggregator:Http:SessionMode`, default `StatefulForInitializeClients`): a client that
+still uses the `initialize` handshake — Claude Desktop through mcp-remote, Claude Code, rockbot —
+gets a session with an `Mcp-Session-Id`, so its list can grow and `list_changed` reaches it. A
+2026-07-28 client is stateless, as that revision requires (it removed protocol sessions,
+SEP-2567): its `tools/list` is always the minimal set and it calls wrappers by name after
+`find_tools`. Set `WrapperMode` to `Eager` only for a client that cannot do either.
 
 Wrapper names track the registered server name. Unregistering and re-registering a server under a
 new name removes the old wrappers and adds new ones, and the server's immutable `id` (shown in
@@ -201,17 +208,18 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 
 | Tool | Description |
 |------|-------------|
-| `find_tools` | Search every registered server for tools matching a query; returns typed tool names and schemas, and activates them in `Lazy` mode |
+| `find_tools` | Search every registered server for tools matching a query; returns typed tool names and schemas, and activates them for this session in `Lazy` mode |
 | `{server}__{tool}` | One typed wrapper per downstream tool, carrying the downstream input schema |
+| `show_admin_tools` | Add the administrative tools below to this session's tool list (`Lazy` mode hides them by default) |
 | `list_services` | Concise index of all registered servers with tool names, wrapper names and descriptions |
 | `get_service_details` | Full tool schemas and prompt templates for a specific server; activates its wrappers in `Lazy` mode |
 | `get_service_skill` | Retrieve a server's skill document (markdown guide) |
 | `invoke_tool` | Escape hatch: proxy a tool call to a downstream server with a stringified JSON argument object |
 | `get_prompt` | Escape hatch: retrieve a rendered prompt template from a downstream server |
 | `refresh_service` | Drop cached connection, tool and prompt lists for a server and rebuild its wrappers |
-| `enable_service` | Enable a registered server (its wrappers reappear) |
-| `disable_service` | Disable a registered server (its wrappers are removed) |
-| `register_server` | Register a new downstream MCP server |
+| `enable_service` | Admin: enable a registered server (its wrappers reappear) |
+| `disable_service` | Admin: disable a registered server (its wrappers are removed) |
+| `register_server` | Admin: register a new downstream MCP server |
 | `unregister_server` | Remove a registered server |
 | `update_server` | Update a registered server's transport configuration or metadata |
 | `update_skill` | Set or update a server's skill document |
@@ -267,6 +275,7 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `IndexCacheTtl` | 5 minutes | How long to cache the service index |
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
+| `Http:SessionMode` | `StatefulForInitializeClients` | HTTP host only: `Stateless`, `Stateful`, or sessions only for clients that use the legacy `initialize` handshake |
 | `WrapperMode` | `Lazy` | When typed `{server}__{tool}` wrappers appear in `tools/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
 | `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
 | `SelfDescription` | *(built-in)* | Description shown for the aggregator in the service index |

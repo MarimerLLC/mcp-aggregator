@@ -82,6 +82,23 @@ public static class McpServerBuilderExtensions
         services.AddSingleton<WrapperToolCatalog>();
         services.AddHostedService<WrapperSyncHostedService>();
 
+        // Progressive disclosure for the aggregator's own surface too. AdminTools is not scanned by
+        // WithToolsFromAssembly; AdminToolSet builds those tools, and only Eager mode puts them in
+        // the shared list. In Lazy mode they are disclosed per session (show_admin_tools) or
+        // dispatched by name. AdminToolSet depends on nothing but the provider, so consulting it
+        // while McpServerOptions are being built creates no cycle with the catalog (which itself
+        // depends on IOptions<McpServerOptions>).
+        services.AddSingleton<AdminToolSet>();
+        services.AddOptions<McpServerOptions>()
+            .PostConfigure<AdminToolSet, IOptions<AggregatorOptions>>((mcpOpts, adminTools, aggOpts) =>
+            {
+                if (aggOpts.Value.WrapperMode != WrapperToolMode.Eager)
+                    return;
+
+                foreach (var tool in adminTools.Tools)
+                    mcpOpts.ToolCollection!.TryAdd(tool);
+            });
+
         // Lazy mode is per session. The SDK lists the shared collection and then appends whatever
         // this handler returns, so each session sees only the wrappers it activated; and a call to
         // a name the collection does not hold falls through to the second handler, which resolves
@@ -104,6 +121,12 @@ public static class McpServerBuilderExtensions
 
             if (name is { Length: > 0 } && catalog is not null)
             {
+                if (catalog.TryGetHiddenTool(name, out var hiddenTool))
+                {
+                    await catalog.ActivateAsync(request.Server, [hiddenTool], ct);
+                    return await hiddenTool.InvokeAsync(request, ct);
+                }
+
                 DownstreamToolWrapper? wrapper;
                 try
                 {
@@ -173,6 +196,8 @@ public static class McpServerBuilderExtensions
                  get_service_skill(serverName: "<downstream>") — usage guide for a specific service.
               5. invoke_tool(serverName, toolName, arguments) — escape hatch only, when a typed tool is
                  not (yet) in your tool list. arguments is a JSON object encoded as a string.
+              6. show_admin_tools() — administrative tools (register/update/unregister servers, skills,
+                 summaries, enable/disable) are hidden until you ask for them; they are also callable by name.
 
             Downstream connections are established lazily on first use and reused across calls.
             Start by calling find_tools or get_service_skill(serverName: "{selfName}").

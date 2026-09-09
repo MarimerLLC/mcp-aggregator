@@ -80,6 +80,12 @@ The session key is `McpServer.SessionId` when the transport has one (stateful HT
 yields exactly "no memory between requests". (`request.Server` is a fresh
 `DestinationBoundMcpServer` facade per request in SDK 2.2.0 and cannot serve as a key.)
 
+The same disclosure applies to the aggregator's own surface. A Lazy session starts with eight
+consumer tools (about 5 KB of `tools/list`); the seven administrative tools are built by
+`AdminToolSet` outside the SDK's assembly scan, never enter the shared collection in Lazy mode,
+and join a session's list only through `show_admin_tools` or by being called by name. Eager mode
+lists them as before.
+
 Defaults: both hosts ship `Lazy`. On stdio, Claude Desktop caps the total tool count at roughly
 44 across all servers, and eager registration of a 55-tool inventory would blow that on its own.
 On stateless HTTP, Lazy means wrappers are never listed and are called by name (Q7); the HTTP host
@@ -162,11 +168,18 @@ does not change and no notification is sent.
   clients that opened a `subscriptions/listen` stream asking for `toolsListChanged` (SEP-2575).
   The SDK client does not open one on its own.
 
-So on the stateless HTTP host, Lazy mode never lists a wrapper: each request is its own session,
-nothing carries over, and no `list_changed` can be delivered. Wrappers are still callable by name
-after `find_tools`, which suits programmatic clients (rockbot) but not hosts that refuse to call an
-unlisted tool; those need `Eager` on the HTTP host. The stdio host gets the per-session broadcast
-on activation.
+**Sessions on HTTP.** The 2026-07-28 revision removed protocol sessions and the `Mcp-Session-Id`
+header (SEP-2567): `tools/list` must not vary per connection, and "servers that need cross-call
+state use explicit, server-minted handles passed as ordinary tool arguments". For the aggregator
+that means a 2026 client gets the minimal list and calls wrappers by name after `find_tools` —
+progressive disclosure without a session, and no handle is needed because by-name dispatch is
+stateless. Clients that still use the `initialize` handshake (Claude Desktop through mcp-remote,
+Claude Code, rockbot today) only call tools they have listed, and the only way their list can grow
+is a session that receives `list_changed`. The HTTP host therefore runs
+`HttpServerSessionMode.StatefulForInitializeClients` (`McpAggregator:Http:SessionMode`): sessions
+with `Mcp-Session-Id` for those clients, stateless requests for everyone else. The SDK marks
+stateful mode a back-compat escape hatch for exactly this population; it will retire with them.
+The stdio host gets the per-session broadcast on activation.
 
 One more stateless-HTTP wrinkle, found during the manual check: the SDK builds a **fresh
 `McpServerOptions` per request** through `IOptionsFactory`, and its options setup runs

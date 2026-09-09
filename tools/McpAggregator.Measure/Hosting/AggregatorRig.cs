@@ -121,6 +121,11 @@ public sealed class AggregatorRig : IAsyncDisposable
         if (condition == Condition.Eager)
             await rig.Catalog.SyncAsync(ct);
 
+        // The pre-#39 surface listed the administrative tools; keep that condition faithful now
+        // that Lazy hides them until disclosed.
+        if (condition == Condition.InvokeTool)
+            await rig.Catalog.ActivateAdminToolsAsync(aggregator.Server, ct);
+
         return rig;
     }
 

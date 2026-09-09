@@ -68,9 +68,13 @@ public sealed class WrapperToolCatalog
     private int _syncQueued;
     private volatile Task _scheduledSync = Task.CompletedTask;
 
+    // The aggregator's own administrative tools. In Lazy mode they are never in the shared
+    // collection; they are disclosed per session by show_admin_tools or by being called by name.
+    private readonly AdminToolSet _adminTools;
+
     private sealed class SessionActivation
     {
-        public ConcurrentDictionary<string, DownstreamToolWrapper> Wrappers { get; } = new(StringComparer.Ordinal);
+        public ConcurrentDictionary<string, McpServerTool> Tools { get; } = new(StringComparer.Ordinal);
         public DateTimeOffset LastTouched { get; set; } = DateTimeOffset.UtcNow;
     }
 
@@ -128,6 +132,7 @@ public sealed class WrapperToolCatalog
         ToolProxyHandler proxy,
         IOptions<AggregatorOptions> options,
         IOptions<McpServerOptions> mcpServerOptions,
+        AdminToolSet adminTools,
         ILogger<WrapperToolCatalog> logger)
     {
         _registry = registry;
@@ -135,6 +140,7 @@ public sealed class WrapperToolCatalog
         _proxy = proxy;
         _options = options.Value;
         _mcpServerOptions = mcpServerOptions;
+        _adminTools = adminTools;
         _logger = logger;
 
         _registry.RegistryChanged += OnRegistryChanged;
@@ -146,6 +152,25 @@ public sealed class WrapperToolCatalog
     /// <summary>The wrapper tools currently in the shared, process-wide tool list (Eager mode).</summary>
     public IReadOnlyList<DownstreamToolWrapper> ActiveWrappers
         => ToolCollection.OfType<DownstreamToolWrapper>().ToList();
+
+    /// <summary>The administrative tools (listed in Eager mode; disclosed per session in Lazy mode).</summary>
+    public IReadOnlyList<McpServerTool> AdminTools => _adminTools.Tools;
+
+    /// <summary>
+    /// Lazy mode: an administrative tool by name, for by-name dispatch of a tool the session has
+    /// not been shown. False in Eager mode, where they are in the shared collection anyway.
+    /// </summary>
+    public bool TryGetHiddenTool(string name, out McpServerTool tool)
+    {
+        if (Mode == WrapperToolMode.Lazy && _adminTools.ByName.TryGetValue(name, out var found))
+        {
+            tool = found;
+            return true;
+        }
+
+        tool = null!;
+        return false;
+    }
 
     /// <summary>
     /// The sync most recently scheduled by a registry or index event. Tests await this to observe
@@ -308,7 +333,7 @@ public sealed class WrapperToolCatalog
     /// session the list changed. No-op in Eager mode (everything is already listed) and when there
     /// is no session to remember it for.
     /// </summary>
-    public async Task ActivateAsync(McpServer? session, IEnumerable<DownstreamToolWrapper> wrappers, CancellationToken ct = default)
+    public async Task ActivateAsync(McpServer? session, IEnumerable<McpServerTool> tools, CancellationToken ct = default)
     {
         if (Mode != WrapperToolMode.Lazy)
             return;
@@ -318,18 +343,18 @@ public sealed class WrapperToolCatalog
             return;
 
         var added = 0;
-        foreach (var wrapper in wrappers)
+        foreach (var tool in tools)
         {
-            if (state.Wrappers.TryAdd(wrapper.ProtocolTool.Name, wrapper))
+            if (state.Tools.TryAdd(tool.ProtocolTool.Name, tool))
                 added++;
             else
-                state.Wrappers[wrapper.ProtocolTool.Name] = wrapper; // refreshed instance
+                state.Tools[tool.ProtocolTool.Name] = tool; // refreshed instance
         }
 
         if (added == 0)
             return;
 
-        _logger.LogInformation("Activated {Count} wrapper tool(s) for a session ({Total} active in it)", added, state.Wrappers.Count);
+        _logger.LogInformation("Activated {Count} tool(s) for a session ({Total} active in it)", added, state.Tools.Count);
 
         try
         {
@@ -352,16 +377,20 @@ public sealed class WrapperToolCatalog
         await ActivateAsync(session, wrappers, ct);
     }
 
-    /// <summary>The wrappers activated for <paramref name="session"/> (Lazy mode); empty otherwise.</summary>
-    public IReadOnlyList<DownstreamToolWrapper> ActivatedFor(McpServer? session)
+    /// <summary>Lazy mode: discloses the administrative tools to <paramref name="session"/>.</summary>
+    public Task ActivateAdminToolsAsync(McpServer? session, CancellationToken ct = default)
+        => ActivateAsync(session, _adminTools.Tools, ct);
+
+    /// <summary>The tools activated for <paramref name="session"/> (Lazy mode); empty otherwise.</summary>
+    public IReadOnlyList<McpServerTool> ActivatedFor(McpServer? session)
         => TryGetSession(session) is { } state
-            ? state.Wrappers.Values.OrderBy(w => w.ProtocolTool.Name, StringComparer.Ordinal).ToList()
+            ? state.Tools.Values.OrderBy(t => t.ProtocolTool.Name, StringComparer.Ordinal).ToList()
             : [];
 
-    /// <summary>True when this wrapper name is in <paramref name="session"/>'s tool list right now.</summary>
-    public bool IsActive(string wrapperName, McpServer? session)
-        => (ToolCollection.TryGetPrimitive(wrapperName, out var tool) && tool is DownstreamToolWrapper)
-           || (TryGetSession(session) is { } state && state.Wrappers.ContainsKey(wrapperName));
+    /// <summary>True when this tool name is in <paramref name="session"/>'s tool list right now.</summary>
+    public bool IsActive(string toolName, McpServer? session)
+        => ToolCollection.TryGetPrimitive(toolName, out _)
+           || (TryGetSession(session) is { } state && state.Tools.ContainsKey(toolName));
 
     // ---------------------------------------------------------------- unknown-tool hint
 
@@ -381,7 +410,10 @@ public sealed class WrapperToolCatalog
                 .Where(t => t is not DownstreamToolWrapper)
                 .Select(t => t.ProtocolTool.Name)
                 .Order(StringComparer.Ordinal);
-            return $"Unknown tool '{toolName}'. Aggregator tools: [{string.Join(", ", aggregatorTools)}]. " +
+            var hiddenNote = Mode == WrapperToolMode.Lazy
+                ? $" Administrative tools [{string.Join(", ", _adminTools.ByName.Keys.Order(StringComparer.Ordinal))}] are hidden until show_admin_tools, but callable by name."
+                : string.Empty;
+            return $"Unknown tool '{toolName}'. Aggregator tools: [{string.Join(", ", aggregatorTools)}].{hiddenNote} " +
                    $"Downstream tools are typed tools named '{{server}}{WrapperNaming.Separator}{{tool}}'. " +
                    $"Call find_tools(query: \"{toolName}\") to get current tool names and schemas, " +
                    "or list_services to browse servers.";
@@ -538,8 +570,8 @@ public sealed class WrapperToolCatalog
 
         foreach (var state in AllSessions())
         {
-            foreach (var kvp in state.Wrappers.Where(kvp => !enabledNames.Contains(kvp.Value.ServerName)).ToList())
-                state.Wrappers.TryRemove(kvp.Key, out _);
+            foreach (var kvp in state.Tools.Where(kvp => kvp.Value is DownstreamToolWrapper w && !enabledNames.Contains(w.ServerName)).ToList())
+                state.Tools.TryRemove(kvp.Key, out _);
         }
     }
 

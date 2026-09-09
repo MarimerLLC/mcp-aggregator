@@ -34,7 +34,7 @@ public class ConsumerTools
         }).ToList();
 
         var hint = matches.Count == 0
-            ? "No downstream tool matched. Try different words, or call list_services to browse every server and its tools."
+            ? "No downstream tool matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
             : catalog.Mode == WrapperToolMode.Lazy
                 ? "Call the 'tool' name directly with the parameters in its inputSchema. These tools are callable by name now, whether or not your client has refreshed its tool list (tools/list_changed was sent to this session). If your client refuses a tool it has not listed, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback."
                 : "Call the 'tool' name directly with the parameters in its inputSchema. If it is not in your tool list, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback.";
@@ -172,28 +172,25 @@ public class ConsumerTools
         return $"Cleared cached connection, ServerInfo, tools, and prompts for '{serverName}'. Skill document was not modified. Metadata will be reloaded on next use.";
     }
 
-    [McpServerTool(Name = "enable_service")]
-    [Description("Enable a registered MCP server, allowing its tools to be invoked.")]
-    public static async Task<string> EnableService(
-        ServerRegistry registry,
-        [Description("The name of the registered server")] string serverName,
+    [McpServerTool(Name = "show_admin_tools")]
+    [Description("Add the aggregator's administrative tools to your tool list: register_server, update_server, unregister_server, update_skill, regenerate_summary, enable_service, disable_service. They are hidden by default so ordinary sessions do not carry them. They can also be called by name without this step.")]
+    public static async Task<string> ShowAdminTools(
+        WrapperToolCatalog catalog,
+        McpServer server,
         CancellationToken ct)
     {
-        await registry.EnsureLoadedAsync(ct);
-        await registry.SetEnabledAsync(serverName, true, ct);
-        return $"Server '{serverName}' enabled.";
-    }
+        await catalog.ActivateAdminToolsAsync(server, ct);
 
-    [McpServerTool(Name = "disable_service")]
-    [Description("Disable a registered MCP server, preventing its tools from being invoked.")]
-    public static async Task<string> DisableService(
-        ServerRegistry registry,
-        [Description("The name of the registered server")] string serverName,
-        CancellationToken ct)
-    {
-        await registry.EnsureLoadedAsync(ct);
-        await registry.SetEnabledAsync(serverName, false, ct);
-        return $"Server '{serverName}' disabled.";
+        var tools = catalog.AdminTools
+            .OrderBy(t => t.ProtocolTool.Name, StringComparer.Ordinal)
+            .Select(t => new { name = t.ProtocolTool.Name, description = t.ProtocolTool.Description })
+            .ToList();
+
+        var hint = catalog.Mode == WrapperToolMode.Lazy
+            ? "These tools are now in your tool list (tools/list_changed was sent to this session) and are callable by name."
+            : "These tools are always listed in Eager mode.";
+
+        return JsonSerializer.Serialize(new { tools, hint }, JsonOptions);
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

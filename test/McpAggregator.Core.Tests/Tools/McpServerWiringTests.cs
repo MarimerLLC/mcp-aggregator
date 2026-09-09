@@ -24,6 +24,7 @@ public class McpServerWiringTests
         var configuration = new ConfigurationBuilder().AddInMemoryCollection().Build();
         var services = new ServiceCollection();
         services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
+        services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         services.AddAggregatorCore(configuration);
         services.AddAggregatorMcpServer()
             .WithToolsFromAssembly(typeof(ConsumerTools).Assembly);
@@ -63,6 +64,7 @@ public class McpServerWiringTests
         Assert.IsTrue(collection.TryGetPrimitive("find_tools", out _));
         Assert.IsTrue(collection.TryGetPrimitive("invoke_tool", out _));
         Assert.IsTrue(collection.TryGetPrimitive("list_services", out _));
+        Assert.IsFalse(collection.TryGetPrimitive("register_server", out _), "Lazy (the default) keeps admin tools out of the shared list.");
     }
 
     [TestMethod]

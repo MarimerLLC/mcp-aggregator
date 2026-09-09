@@ -4,6 +4,7 @@ using McpAggregator.Core.Models;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Storage;
 using McpAggregator.Core.Tools;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -120,7 +121,8 @@ internal sealed class WrapperHarness : IAsyncDisposable
         harness.Proxy = new ToolProxyHandler(harness.Connections, harness.Index, options,
             TestHelpers.NullLoggerOf<ToolProxyHandler>());
         harness.Catalog = new WrapperToolCatalog(harness.Registry, harness.Index, harness.Proxy, options,
-            TestHelpers.OptionsOf(harness.McpOptions), TestHelpers.NullLoggerOf<WrapperToolCatalog>());
+            TestHelpers.OptionsOf(harness.McpOptions), new AdminToolSet(new ServiceCollection().BuildServiceProvider()),
+            TestHelpers.NullLoggerOf<WrapperToolCatalog>());
 
         return harness;
     }

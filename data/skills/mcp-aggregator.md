@@ -17,7 +17,8 @@ Every downstream tool is available as a **typed tool named `{server}__{tool}`** 
 3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas and prompt templates and, in `Lazy` mode, makes that server's typed tools callable.
 4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
 5. **Fallback** — if a typed tool is not in your tool list (your client has not refreshed it, or you are on the stateless HTTP endpoint), call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt` the same way for prompt templates.
-6. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
+6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
+7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
 The same discovery data is available via the REST API. Start with `GET /api` to get aggregator info and links, then use the REST endpoints listed in the Tool Reference table below. Typed tools are MCP-only; REST callers use the invoke endpoint.
 
@@ -33,6 +34,7 @@ The same discovery data is available via the REST API. Start with `GET /api` to 
 | `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Escape hatch: proxy a tool call with a stringified JSON argument object |
 | `get_prompt` | — | Escape hatch: retrieve a rendered prompt template from a downstream server (MCP only) |
 | `refresh_service` | — | Drop cached connection, tools and prompts for a server and rebuild its typed tools |
+| `show_admin_tools` | — | Add the administrative tools to your tool list (hidden by default in `Lazy` mode) |
 | `enable_service` | `POST /api/admin/services/{name}/enable` | Enable a disabled server, allowing tool invocations |
 | `disable_service` | `POST /api/admin/services/{name}/disable` | Disable a server, preventing tool invocations |
 | `register_server` | `POST /api/admin/services` | Register a new downstream server |
