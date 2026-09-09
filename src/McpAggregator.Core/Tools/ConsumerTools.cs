@@ -36,8 +36,8 @@ public class ConsumerTools
         var hint = matches.Count == 0
             ? "No downstream tool matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
             : catalog.Mode == WrapperToolMode.Lazy
-                ? "Call the 'tool' name directly with the parameters in its inputSchema. These tools are callable by name now, whether or not your client has refreshed its tool list (tools/list_changed was sent to this session). If your client refuses a tool it has not listed, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback."
-                : "Call the 'tool' name directly with the parameters in its inputSchema. If it is not in your tool list, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) as a fallback.";
+                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead."
+                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead.";
 
         return JsonSerializer.Serialize(new
         {
@@ -187,7 +187,7 @@ public class ConsumerTools
             .ToList();
 
         var hint = catalog.Mode == WrapperToolMode.Lazy
-            ? "These tools are now in your tool list (tools/list_changed was sent to this session) and are callable by name."
+            ? "These tools are now in this session's tool list (tools/list_changed was sent). If your client rejects one of these names as not found, its tool index has not refreshed; the aggregator's own tools still work by name."
             : "These tools are always listed in Eager mode.";
 
         return JsonSerializer.Serialize(new { tools, hint }, JsonOptions);

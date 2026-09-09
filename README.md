@@ -179,8 +179,12 @@ drills into a server; the seven administrative tools (`register_server`, `update
 join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
 list. A client that already knows a name (from `find_tools`, a skill document, an earlier
 session) can call it directly; the aggregator resolves it by name and, from then on, lists it for
-that session. `Lazy` is the default because Claude Desktop caps the total number of tools across
-all connected servers at roughly 44.
+that session. Whether the *client* lets that call out is another matter: Claude Desktop chat
+re-fetches `tools/list` on `list_changed` but does not refresh the running conversation's tool
+index, so a wrapper activated mid-conversation is rejected client-side there and the model has
+to fall back to `invoke_tool` (the skill document and every runtime hint say so). `Lazy` is the
+default because Claude Desktop caps the total number of tools across all connected servers at
+roughly 44.
 
 Both hosts ship with `Lazy`. On the HTTP host, session handling follows the client's protocol
 revision (`McpAggregator:Http:SessionMode`, default `StatefulForInitializeClients`): a client that

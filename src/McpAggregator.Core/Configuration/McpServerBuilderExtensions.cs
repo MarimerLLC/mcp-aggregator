@@ -194,8 +194,10 @@ public static class McpServerBuilderExtensions
                  of searching; get_service_details also makes that server's typed tools callable.
               4. get_service_skill(serverName: "{selfName}") — full usage guide for this aggregator;
                  get_service_skill(serverName: "<downstream>") — usage guide for a specific service.
-              5. invoke_tool(serverName, toolName, arguments) — escape hatch only, when a typed tool is
-                 not (yet) in your tool list. arguments is a JSON object encoded as a string.
+              5. invoke_tool(serverName, toolName, arguments) — use this when your client rejects a
+                 "<server>__<tool>" name as not found (some clients do not refresh their tool index
+                 mid-conversation even after tools/list_changed). Do not retry the typed name in that
+                 conversation. arguments is a JSON object encoded as a string.
               6. show_admin_tools() — administrative tools (register/update/unregister servers, skills,
                  summaries, enable/disable) are hidden until you ask for them; they are also callable by name.
 

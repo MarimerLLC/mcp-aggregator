@@ -274,7 +274,9 @@ public class ToolProxyHandler
                 var hint = await TryBuildArgumentHintAsync(serverName, toolName, args, errorText, ct);
                 if (hint is not null)
                 {
-                    result.Content = [.. result.Content, new TextContentBlock { Text = hint }];
+                    // Clients render content blocks back to back with no separator, so the
+                    // hint carries its own paragraph break.
+                    result.Content = [.. result.Content, new TextContentBlock { Text = "\n\n" + hint }];
                     _logger.LogInformation(
                         "Attached argument-schema hint to error result for '{Tool}' on '{Server}'",
                         toolName, serverName);

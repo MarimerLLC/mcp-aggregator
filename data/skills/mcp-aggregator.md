@@ -2,7 +2,7 @@
 
 This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection. The aggregator exposes both an **MCP tool interface** and an equivalent **REST API** — use whichever fits your client.
 
-Every downstream tool is available as a **typed tool named `{server}__{tool}`** (for example `microsoft-learn__microsoft_docs_search`) that takes the downstream tool's own parameters. Prefer those. `invoke_tool` is the fallback.
+Every downstream tool is available as a **typed tool named `{server}__{tool}`** (for example `microsoft-learn__microsoft_docs_search`) that takes the downstream tool's own parameters. Use those when your client lets you call them; use `invoke_tool` when it does not (see *Client capability* below). Both reach the same downstream tool.
 
 ## When to Use the Aggregator
 
@@ -16,9 +16,11 @@ Every downstream tool is available as a **typed tool named `{server}__{tool}`** 
 2. **Call the typed tool** — call the returned `tool` name directly with the parameters from its `inputSchema`, e.g. `microsoft-learn__microsoft_docs_search(query: "dependency injection")`.
 3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas and prompt templates and, in `Lazy` mode, makes that server's typed tools callable.
 4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
-5. **Fallback** — if a typed tool is not in your tool list (your client has not refreshed it, or you are on the stateless HTTP endpoint), call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt` the same way for prompt templates.
+5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt` the same way for prompt templates.
 6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
 7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
+
+**Client capability.** The aggregator sends `tools/list_changed` to your session when typed tools are activated, and the SDK-level clients re-fetch `tools/list`. Whether *you* can then call the new names depends on your client. Some clients build their tool index once per conversation and reject any name outside it before the call reaches the aggregator; Claude Desktop chat (September 2026, via `mcp-remote`) behaves this way, so a typed tool activated during a conversation fails there with a client-side "not found" even though the aggregator listed it. If that happens, do not retry the typed name in that conversation: call `invoke_tool` with the same arguments. The typed tools are already in the session's list and should be callable at the start of your next conversation. Clients that honor `list_changed` mid-conversation can call the typed tools immediately.
 
 The same discovery data is available via the REST API. Start with `GET /api` to get aggregator info and links, then use the REST endpoints listed in the Tool Reference table below. Typed tools are MCP-only; REST callers use the invoke endpoint.
 
@@ -60,11 +62,11 @@ microsoft-learn__microsoft_docs_search(query: "dependency injection in ASP.NET C
 
 - A typed tool called without one of its required parameters returns an error naming the parameter and embedding the schema; the downstream is not contacted. Re-invoke with the missing parameter.
 - Each server has an immutable `id` (in `list_services`, `get_service_details`, `find_tools`). Typed tool names follow the server *name*; if a server is unregistered and re-registered under a new name, its typed tools change and its `id` changes. If a stored typed name stops existing, run `find_tools` again.
-- `WrapperMode` on the aggregator is `Lazy` (typed tools appear in **your** tool list after you call `find_tools` / `get_service_details`, and the aggregator sends you `tools/list_changed`; other clients' lists are unaffected) or `Eager` (all typed tools are always listed). In either mode a typed tool is callable by its name as soon as you know it, listed or not. `find_tools` reports the mode.
+- `WrapperMode` on the aggregator is `Lazy` (typed tools appear in **your** tool list after you call `find_tools` / `get_service_details`, and the aggregator sends you `tools/list_changed`; other clients' lists are unaffected) or `Eager` (all typed tools are always listed). In either mode the aggregator accepts a typed tool by name as soon as you know it, listed or not; whether your client lets the call out is the *Client capability* question above. `find_tools` reports the mode.
 
 ## Calling invoke_tool (fallback)
 
-Use `invoke_tool` only when the typed tool is not in your tool list. Pass `arguments` as a JSON object **encoded as a string** with the tool's expected parameters.
+Use `invoke_tool` when your client will not let you call the typed tool (see *Client capability*). Pass `arguments` as a JSON object **encoded as a string** with the tool's expected parameters.
 
 **Example:**
 ```
@@ -106,7 +108,8 @@ Content-Type: application/json
 
 - **Server unavailable:** If a server is disabled (via `disable_service`) or cannot be reached, typed tool and `invoke_tool` calls return an error result "Server '{name}' is unavailable." Check `list_services` to see the server's enabled status. In `Eager` mode a disabled server's typed tools are removed from the tool list.
 - **Missing parameter:** A typed tool called without a required parameter returns an error naming it. `invoke_tool` errors on argument mismatches attach the missing/unknown keys and the schema.
-- **Unknown typed tool:** Calling a `{server}__{tool}` name that exists simply works, even if it is not in your tool list yet (it is added to your list afterwards). Calling one that does not exist returns an error result that says why: the server was renamed or removed (with the registered server names), the server is disabled, or the server has no such tool (with its actual tool names). If your client rejects the name before sending it, run `find_tools` again.
+- **Typed tool rejected by your client ("not found" before any aggregator response):** your client's tool index has not refreshed. Do not retry the typed name in this conversation; call `invoke_tool(serverName, toolName, arguments)` with the same arguments.
+- **Unknown typed tool (aggregator error result):** the aggregator accepts any existing `{server}__{tool}` name whether or not it is in your list, and lists it for your session afterwards. A name that does not exist returns an error result that says why: the server was renamed or removed (with the registered server names), the server is disabled, or the server has no such tool (with its actual tool names). Run `find_tools` again.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
 - **Slow first call:** Connections to downstream servers are lazy. The first call to a server may take longer as the connection is established. Subsequent calls will be faster.
 ## Tips

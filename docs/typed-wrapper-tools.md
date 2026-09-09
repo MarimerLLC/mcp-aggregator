@@ -401,10 +401,35 @@ surface costs 3–5 calls and 2–3× the tokens of one typed call.
   shipping; the durable fix is not giving the model a call shape it can get wrong.
 - **Q9:** no model confused the two OneDrive servers on the typed surface.
 
+#### Real host: Claude Desktop (2026-09-09, HTTP host 1.0.0 via mcp-remote 0.8.6)
+
+Lazy mode, `StatefulForInitializeClients`. The pod log shows the transport half working exactly
+as designed: Desktop negotiated 2025-06-18 and got an `Mcp-Session-Id`; `find_tools` activated 3
+wrappers and `get_service_details` 6 more, and after each activation the client re-fetched
+`tools/list` within the same second (8 → 11 → 17 tools for that session; a second Desktop
+identity on the same endpoint stayed at 8). Every recovery path held: missing-parameter hint,
+unknown-tool hint with the server's real tool names, `refresh_service` followed by a clean lazy
+reconnect.
+
+The application half did not: Desktop chat builds the conversation's tool index once and
+validates names against it before dispatch, so `csla__version()` failed client-side with
+"Tool 'csla__version' not found" and never reached the aggregator (no `tools/call` in the log).
+All seven downstream calls in that conversation went through `invoke_tool`, all correct. So on
+Claude Desktop chat, a wrapper activated mid-conversation is unreachable until the next
+conversation, and the skill document's original "prefer typed; invoke_tool is the fallback"
+cost the model a guaranteed failed turn. The skill document, server instructions and runtime
+hints now carry a client-capability caveat: if the client rejects a typed name as not found,
+switch to `invoke_tool` for the rest of the conversation. Desktop also renders content blocks
+with no separator, which is why the argument-mismatch hint block now starts with a paragraph
+break.
+
 #### Not yet measured
 
-- Host behavior: what Claude Desktop does at the 44-tool cap in Eager mode; whether Claude
-  Desktop, Claude Code and rockbot's client honor `list_changed` in Lazy mode.
+- Whether Claude Desktop offers the activated wrappers at the start of the *next* conversation
+  on the same mcp-remote session (the session's list already contains them).
+- Whether Claude Code and rockbot's client refresh their tool index on `list_changed`
+  mid-conversation.
+- What Claude Desktop does at the 44-tool cap in Eager mode.
 - The rename drill on a real host (register, activate, re-register under a new name).
 
 ### Templates for the remaining runs
@@ -434,7 +459,7 @@ grouped by `via` and `result`.
 
 | Host | Protocol negotiated | Honors `list_changed` | Behavior at the 44-tool cap (Eager) | Activated-then-removed tool |
 |---|---|---|---|---|
-| Claude Desktop | | | | |
+| Claude Desktop (chat, mcp-remote 0.8.6) | 2025-06-18 | transport yes (re-lists within 1 s); conversation tool index no | | |
 | Claude Code | | | | |
 | rockbot client | | | | |
 | C# SDK client (tests) | 2025-06-18 / 2026-07-28 | yes (broadcast) / yes (with `subscriptions/listen`) | n/a | removed from next `tools/list` |
