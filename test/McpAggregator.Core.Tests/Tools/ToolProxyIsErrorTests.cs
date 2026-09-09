@@ -249,6 +249,25 @@ public class ToolProxyIsErrorTests
     }
 
     [TestMethod]
+    public async Task InvokeTool_AgainstTheAggregatorItself_SaysToCallTheToolDirectly()
+    {
+        // Seen on Claude Desktop: list_services advertises the aggregator as a service, so after
+        // show_admin_tools the model tried invoke_tool(serverName: "mcp-aggregator", toolName:
+        // "update_skill"). The answer must redirect, not just say "unknown server".
+        await using var harness = await CreateHarnessAsync();
+
+        var result = await ConsumerTools.InvokeTool(harness.Proxy, harness.Registry,
+            "MCP-Aggregator", "update_skill", "{\"serverName\":\"adjutant\"}", CancellationToken.None);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "is this aggregator");
+        StringAssert.Contains(text, "Call 'update_skill' directly");
+        StringAssert.Contains(text, "show_admin_tools");
+        Assert.IsFalse(text.Contains("Registered servers"), "Must not fall through to the unknown-server hint.");
+    }
+
+    [TestMethod]
     public void CallToolResult_WebJson_EmitsIsError()
     {
         // ServicesController.InvokeTool does Ok(result), which serializes with ASP.NET web defaults

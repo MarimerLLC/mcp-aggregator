@@ -93,7 +93,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "invoke_tool")]
-    [Description("Escape hatch: invoke a downstream tool through the generic proxy. Prefer the typed '{server}__{tool}' tools (see find_tools), which take the tool's real parameters. Use this only when the typed tool is not in your tool list. 'arguments' must be the tool's argument object encoded as a JSON string.")]
+    [Description("Invoke a downstream tool through the generic proxy. The typed '{server}__{tool}' tools (see find_tools) take the tool's real parameters; use this when your client rejects a typed name as not found. Downstream servers only: the aggregator's own tools (find_tools, update_skill, ...) are called directly. 'arguments' must be the tool's argument object encoded as a JSON string.")]
     public static async Task<CallToolResult> InvokeTool(
         ToolProxyHandler proxy,
         ServerRegistry registry,
@@ -102,6 +102,16 @@ public class ConsumerTools
         [Description("The tool's argument object encoded as a JSON string, e.g. \"{\\\"query\\\": \\\"...\\\"}\"")] string? arguments = null,
         CancellationToken ct = default)
     {
+        // list_services advertises the aggregator itself (so its skill document is discoverable),
+        // which invites exactly this call. Its tools are ordinary MCP tools on this connection.
+        if (string.Equals(serverName, registry.SelfName, StringComparison.OrdinalIgnoreCase))
+        {
+            return ErrorResult($"'{serverName}' is this aggregator, not a downstream server, so invoke_tool cannot reach its tools. " +
+                               $"Call '{toolName}' directly as a tool on this connection with the same arguments. " +
+                               "If your client does not list it, call show_admin_tools (administrative tools) or find_tools first; " +
+                               "the aggregator also accepts its own tools by name whether or not they are listed.");
+        }
+
         try
         {
             return await proxy.InvokeAsync(serverName, toolName, arguments, ct);

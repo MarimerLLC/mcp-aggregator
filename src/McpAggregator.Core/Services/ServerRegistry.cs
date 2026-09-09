@@ -28,6 +28,9 @@ public partial class ServerRegistry
 
     public event Action? RegistryChanged;
 
+    /// <summary>The aggregator's own name, which is never a downstream.</summary>
+    public string SelfName => _options.SelfName;
+
     public ServerRegistry(
         IRegistryPersistence persistence,
         IOptions<AggregatorOptions> options,
