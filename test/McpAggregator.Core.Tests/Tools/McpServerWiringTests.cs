@@ -81,4 +81,38 @@ public class McpServerWiringTests
         Assert.IsTrue(perRequest.ToolCollection!.TryGetPrimitive("probe__marker", out var seen));
         Assert.AreSame(marker, seen);
     }
+
+    // ---------------------------------------------------------------- prompts (issue #40)
+
+    [TestMethod]
+    public void EveryOptionsInstance_SharesOnePromptCollection()
+    {
+        using var provider = BuildProvider();
+
+        var singleton = provider.GetRequiredService<IOptions<McpServerOptions>>().Value;
+        var factory = provider.GetRequiredService<IOptionsFactory<McpServerOptions>>();
+        var perRequest1 = factory.Create(Options.DefaultName);
+        var perRequest2 = factory.Create(Options.DefaultName);
+
+        Assert.IsNotNull(singleton.PromptCollection, "A non-null collection is what advertises the prompts capability.");
+        Assert.AreSame(singleton.PromptCollection, perRequest1.PromptCollection);
+        Assert.AreSame(singleton.PromptCollection, perRequest2.PromptCollection);
+        Assert.AreEqual(0, singleton.PromptCollection.Count, "The aggregator has no prompts of its own.");
+    }
+
+    [TestMethod]
+    public void PromptAddedToTheSharedCollection_IsVisibleToAFreshOptionsInstance()
+    {
+        using var provider = BuildProvider();
+
+        var shared = provider.GetRequiredService<IOptions<McpServerOptions>>().Value.PromptCollection!;
+        var marker = McpServerPrompt.Create(() => "x", new McpServerPromptCreateOptions { Name = "probe__marker" });
+        shared.Add(marker);
+
+        var perRequest = provider.GetRequiredService<IOptionsFactory<McpServerOptions>>().Create(Options.DefaultName);
+
+        Assert.IsTrue(perRequest.PromptCollection!.TryGetPrimitive("probe__marker", out var seen));
+        Assert.AreSame(marker, seen);
+        Assert.AreEqual(1, shared.Count, "Repeated per-request configuration must not duplicate prompts.");
+    }
 }

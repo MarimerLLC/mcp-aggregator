@@ -93,6 +93,21 @@ public class PromptDetail
     public required string Name { get; set; }
     public string? Description { get; set; }
     public List<PromptArgumentDetail> Arguments { get; set; } = [];
+
+    /// <summary>
+    /// Name of the MCP prompt the aggregator exposes for this downstream prompt
+    /// (<c>{server}__{prompt}</c>). Requested through <c>prompts/get</c> once it appears in the
+    /// client's prompt list.
+    /// </summary>
+    public string? WrapperName { get; set; }
+
+    /// <summary>
+    /// The downstream prompt exactly as it came over the wire (title, arguments, icons, meta).
+    /// Kept so <see cref="Tools.DownstreamPromptWrapper"/> can carry everything through unchanged;
+    /// not part of the serialized consumer surface.
+    /// </summary>
+    [JsonIgnore]
+    public Prompt? Protocol { get; set; }
 }
 
 public class PromptArgumentDetail

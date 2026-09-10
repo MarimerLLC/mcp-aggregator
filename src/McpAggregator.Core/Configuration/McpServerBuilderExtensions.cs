@@ -29,9 +29,17 @@ public static class McpServerBuilderExtensions
         // throwaway collection and never see the wrappers WrapperToolCatalog adds. This Configure
         // is registered before AddMcpServer() so it runs first; the PostConfigure below is the
         // belt-and-braces for any ordering the SDK might change.
+        // The same holds for PromptCollection (issue #40): a non-null collection is also what makes
+        // the SDK advertise the prompts capability with listChanged, so it is pre-assigned even
+        // though the aggregator has no attributed prompts of its own.
         var sharedTools = new McpServerPrimitiveCollection<McpServerTool>();
+        var sharedPrompts = new McpServerPrimitiveCollection<McpServerPrompt>();
         services.AddOptions<McpServerOptions>()
-            .Configure(mcpOpts => mcpOpts.ToolCollection = sharedTools);
+            .Configure(mcpOpts =>
+            {
+                mcpOpts.ToolCollection = sharedTools;
+                mcpOpts.PromptCollection = sharedPrompts;
+            });
 
         var builder = services.AddMcpServer();
 
@@ -67,17 +75,27 @@ public static class McpServerBuilderExtensions
         // rather than in AddAggregatorCore because it depends on the MCP server options.
         services.PostConfigure<McpServerOptions>(mcpOpts =>
         {
-            if (ReferenceEquals(mcpOpts.ToolCollection, sharedTools))
-                return;
-
-            // Something replaced the collection after our Configure ran: fold its tools into the
+            // Something replaced a collection after our Configure ran: fold its entries into the
             // shared one (TryAdd is idempotent by name) and put the shared one back.
-            if (mcpOpts.ToolCollection is { } other)
+            if (!ReferenceEquals(mcpOpts.ToolCollection, sharedTools))
             {
-                foreach (var tool in other)
-                    sharedTools.TryAdd(tool);
+                if (mcpOpts.ToolCollection is { } otherTools)
+                {
+                    foreach (var tool in otherTools)
+                        sharedTools.TryAdd(tool);
+                }
+                mcpOpts.ToolCollection = sharedTools;
             }
-            mcpOpts.ToolCollection = sharedTools;
+
+            if (!ReferenceEquals(mcpOpts.PromptCollection, sharedPrompts))
+            {
+                if (mcpOpts.PromptCollection is { } otherPrompts)
+                {
+                    foreach (var prompt in otherPrompts)
+                        sharedPrompts.TryAdd(prompt);
+                }
+                mcpOpts.PromptCollection = sharedPrompts;
+            }
         });
         services.AddSingleton<WrapperToolCatalog>();
         services.AddHostedService<WrapperSyncHostedService>();
@@ -154,6 +172,51 @@ public static class McpServerBuilderExtensions
             throw new McpProtocolException($"Unknown tool: '{name}'", McpErrorCode.InvalidParams);
         });
 
+        // Proxied prompts (issue #40) follow the same two-handler shape: the SDK lists the shared
+        // PromptCollection and appends this session's activated prompts; prompts/get for a name
+        // the collection does not hold resolves any proxied prompt by name and activates it.
+        builder.WithListPromptsHandler((request, ct) =>
+        {
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+            var prompts = catalog?.ActivatedPromptsFor(request.Server) ?? [];
+            return ValueTask.FromResult(new ListPromptsResult
+            {
+                Prompts = prompts.Select(p => p.ProtocolPrompt).ToList()
+            });
+        });
+
+        builder.WithGetPromptHandler(async (request, ct) =>
+        {
+            var name = request.Params?.Name;
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+
+            if (name is { Length: > 0 } && catalog is not null)
+            {
+                DownstreamPromptWrapper? wrapper;
+                try
+                {
+                    wrapper = await catalog.ResolvePromptAsync(name, ct);
+                }
+                catch (AggregatorException ex) when (!ct.IsCancellationRequested)
+                {
+                    // Registered and enabled, but unreachable. Prompts have no error result, so
+                    // the readable message travels as the protocol error text.
+                    throw new McpProtocolException(ex.Message, McpErrorCode.InternalError);
+                }
+
+                if (wrapper is not null)
+                {
+                    await catalog.ActivatePromptsAsync(request.Server, [wrapper], ct);
+                    return await wrapper.GetAsync(request, ct);
+                }
+            }
+
+            throw new McpProtocolException(
+                $"Unknown prompt: '{name}'. Downstream prompts are named '{{server}}{WrapperNaming.Separator}{{prompt}}'; " +
+                "call find_tools or get_service_details to list them.",
+                McpErrorCode.InvalidParams);
+        });
+
         return builder;
     }
 
@@ -185,19 +248,24 @@ public static class McpServerBuilderExtensions
 
             Downstream tools are exposed as typed tools named "<server>__<tool>" (for example
             "microsoft-learn__microsoft_docs_search") that take the downstream tool's own parameters.
+            Downstream prompt templates are exposed as MCP prompts named "<server>__<prompt>" with the
+            downstream prompt's own arguments.
 
             Workflow:
-              1. find_tools(query: "<what you need>") — search every downstream for matching tools.
-                 Results include each tool's exact name and input schema, and make the tools callable.
-              2. Call the "<server>__<tool>" tool directly with its listed parameters.
+              1. find_tools(query: "<what you need>") — search every downstream for matching tools and
+                 prompts. Results include each tool's exact name and input schema (and each prompt's
+                 name and arguments), and make them callable.
+              2. Call the "<server>__<tool>" tool directly with its listed parameters; request a
+                 "<server>__<prompt>" prompt through prompts/get with its listed arguments.
               3. list_services() / get_service_details(serverName) — browse servers and schemas instead
-                 of searching; get_service_details also makes that server's typed tools callable.
+                 of searching; get_service_details also makes that server's typed tools and prompts callable.
               4. get_service_skill(serverName: "{selfName}") — full usage guide for this aggregator;
                  get_service_skill(serverName: "<downstream>") — usage guide for a specific service.
               5. invoke_tool(serverName, toolName, arguments) — use this when your client rejects a
                  "<server>__<tool>" name as not found (some clients do not refresh their tool index
                  mid-conversation even after tools/list_changed). Do not retry the typed name in that
-                 conversation. arguments is a JSON object encoded as a string.
+                 conversation. arguments is a JSON object encoded as a string. get_prompt(serverName,
+                 promptName, arguments) is the same escape hatch for prompts.
               6. show_admin_tools() — administrative tools (register/update/unregister servers, skills,
                  summaries, enable/disable) are hidden until you ask for them; they are also callable by name.
 

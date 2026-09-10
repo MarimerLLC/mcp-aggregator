@@ -21,6 +21,17 @@ public static class AggregatorTelemetry
     public static readonly Histogram<double> ToolInvocationDuration =
         Meter.CreateHistogram<double>("mcp_tool_invocation_duration_seconds", unit: "s", description: "Wall-clock duration of tool invocations");
 
+    /// <summary>
+    /// Total prompt fetches; tags: server_name, prompt_name, result (success|error|timeout|cancelled),
+    /// via (wrapper|get_prompt — whether the request came through a proxied MCP prompt or the escape hatch).
+    /// </summary>
+    public static readonly Counter<long> PromptGets =
+        Meter.CreateCounter<long>("mcp_prompt_gets_total", description: "Total prompt fetches routed to downstream servers");
+
+    /// <summary>Prompt fetch wall-clock duration; tags: server_name, prompt_name, via</summary>
+    public static readonly Histogram<double> PromptGetDuration =
+        Meter.CreateHistogram<double>("mcp_prompt_get_duration_seconds", unit: "s", description: "Wall-clock duration of prompt fetches");
+
     /// <summary>Downstream server connection attempts; tags: server_name, result (connected|failed)</summary>
     public static readonly Counter<long> ConnectionAttempts =
         Meter.CreateCounter<long>("mcp_connection_attempts_total", description: "Total connection attempts to downstream MCP servers");

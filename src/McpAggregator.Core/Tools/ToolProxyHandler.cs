@@ -19,8 +19,11 @@ public static class InvocationPath
     /// <summary>The generic <c>invoke_tool</c> proxy (or the REST invoke endpoint).</summary>
     public const string InvokeTool = "invoke_tool";
 
-    /// <summary>A typed <c>{server}__{tool}</c> wrapper tool.</summary>
+    /// <summary>A typed <c>{server}__{tool}</c> wrapper tool, or a proxied <c>{server}__{prompt}</c> prompt.</summary>
     public const string Wrapper = "wrapper";
+
+    /// <summary>The generic <c>get_prompt</c> escape hatch.</summary>
+    public const string GetPrompt = "get_prompt";
 }
 
 public class ToolProxyHandler
@@ -336,6 +339,133 @@ public class ToolProxyHandler
             AggregatorTelemetry.ToolInvocations.Add(1, tags);
             AggregatorTelemetry.ToolInvocationDuration.Record(sw.Elapsed.TotalSeconds,
                 new TagList { { "server_name", serverName }, { "tool_name", toolName }, { "via", via } });
+        }
+    }
+
+    // ---------------------------------------------------------------- prompts
+
+    /// <summary>
+    /// When a <c>prompts/get</c> fails at the protocol level, checks whether the server declares
+    /// the prompt at all. Returns a corrective message naming the prompts it does declare when it
+    /// does not, or null when the prompt is known — so a genuine downstream fault keeps propagating.
+    /// </summary>
+    private async Task<string?> TryBuildUnknownPromptHintAsync(
+        string serverName,
+        string promptName,
+        Exception cause,
+        CancellationToken ct)
+    {
+        try
+        {
+            var prompts = await _toolIndex.GetPromptsForServerAsync(serverName, ct);
+
+            if (prompts.Any(p => string.Equals(p.Name, promptName, StringComparison.Ordinal)))
+                return null;
+
+            var available = prompts.Count > 0
+                ? string.Join(", ", prompts.Select(p => p.Name).Order(StringComparer.Ordinal))
+                : "(none)";
+
+            var wrapperSlip = WrapperNaming.TryParse(promptName, out var prefix, out var downstreamName)
+                && string.Equals(prefix, serverName, StringComparison.OrdinalIgnoreCase)
+                && prompts.Any(p => string.Equals(p.Name, downstreamName, StringComparison.Ordinal))
+                ? $"'{promptName}' is the proxied prompt name; request it directly as a prompt, or pass promptName: \"{downstreamName}\" here. "
+                : string.Empty;
+
+            return $"Unknown prompt '{promptName}' on server '{serverName}'. {wrapperSlip}" +
+                   $"Available prompts: [{available}]. " +
+                   $"Re-invoke with one of those names, or call get_service_details(serverName: \"{serverName}\") " +
+                   $"for their arguments. Underlying error: {cause.Message}";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to build unknown-prompt hint for '{Prompt}' on '{Server}'", promptName, serverName);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The single downstream <c>prompts/get</c> path, shared by the proxied
+    /// <c>{server}__{prompt}</c> prompts and the <c>get_prompt</c> escape hatch: timeout, retry,
+    /// telemetry and the unknown-prompt hint live here. Failures the caller can act on
+    /// (unreachable server, timeout, unknown prompt) surface as <see cref="AggregatorException"/>;
+    /// a genuine downstream fault on a known prompt propagates as the original
+    /// <see cref="McpProtocolException"/>.
+    /// </summary>
+    /// <param name="via">
+    /// Which surface the request arrived through — one of the <see cref="InvocationPath"/> constants,
+    /// recorded as the <c>via</c> tag on the prompt metric and activity.
+    /// </param>
+    public async Task<GetPromptResult> GetPromptAsync(
+        string serverName,
+        string promptName,
+        IReadOnlyDictionary<string, object?>? args,
+        string via,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation("Getting prompt '{Prompt}' on '{Server}' via {Via}", promptName, serverName, via);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(_options.DefaultToolTimeout);
+
+        using var activity = AggregatorTelemetry.ActivitySource.StartActivity("mcp.prompt_get");
+        activity?.SetTag("server_name", serverName);
+        activity?.SetTag("prompt_name", promptName);
+        activity?.SetTag("via", via);
+
+        var sw = Stopwatch.StartNew();
+        string resultLabel = "error";
+
+        try
+        {
+            var result = await _connectionManager.ExecuteWithRetryAsync<GetPromptResult>(serverName,
+                async (client, token) => await client.GetPromptAsync(promptName, args, cancellationToken: token), cts.Token);
+
+            _logger.LogDebug("Prompt '{Prompt}' on '{Server}' returned {Count} message(s)",
+                promptName, serverName, result.Messages.Count);
+
+            resultLabel = "success";
+            return result;
+        }
+        catch (McpProtocolException ex) when (!ct.IsCancellationRequested)
+        {
+            var hint = await TryBuildUnknownPromptHintAsync(serverName, promptName, ex, ct);
+            if (hint is null)
+                throw;
+
+            _logger.LogWarning("Unknown prompt '{Prompt}' requested on '{Server}': {Error}",
+                promptName, serverName, ex.Message);
+            throw new AggregatorException(hint, ex);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            resultLabel = "cancelled";
+            throw;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            resultLabel = "timeout";
+            throw new AggregatorException($"Prompt '{promptName}' on '{serverName}' timed out after {_options.DefaultToolTimeout.TotalSeconds}s.");
+        }
+        finally
+        {
+            sw.Stop();
+
+            if (resultLabel == "success")
+                activity?.SetStatus(ActivityStatusCode.Ok);
+            else if (resultLabel is "error" or "timeout")
+                activity?.SetStatus(ActivityStatusCode.Error, resultLabel);
+
+            var tags = new TagList
+            {
+                { "server_name", serverName },
+                { "prompt_name", promptName },
+                { "result", resultLabel },
+                { "via", via }
+            };
+            AggregatorTelemetry.PromptGets.Add(1, tags);
+            AggregatorTelemetry.PromptGetDuration.Record(sw.Elapsed.TotalSeconds,
+                new TagList { { "server_name", serverName }, { "prompt_name", promptName }, { "via", via } });
         }
     }
 }

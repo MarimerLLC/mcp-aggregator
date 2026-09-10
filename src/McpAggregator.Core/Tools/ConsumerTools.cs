@@ -12,7 +12,7 @@ namespace McpAggregator.Core.Tools;
 public class ConsumerTools
 {
     [McpServerTool(Name = "find_tools")]
-    [Description("Search every registered downstream MCP server for tools matching a query (tool name, description, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, and makes them callable in your tool list. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
+    [Description("Search every registered downstream MCP server for tools and prompt templates matching a query (name, description, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, plus matching prompts ('{server}__{prompt}') with their arguments, and makes them callable in your tool and prompt lists. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
     public static async Task<string> FindTools(
         WrapperToolCatalog catalog,
         McpServer server,
@@ -33,16 +33,28 @@ public class ConsumerTools
             activated = catalog.IsActive(m.Wrapper.ProtocolTool.Name, server)
         }).ToList();
 
-        var hint = matches.Count == 0
-            ? "No downstream tool matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
+        var prompts = result.Prompts.Select(m => new
+        {
+            prompt = m.Wrapper.ProtocolPrompt.Name,
+            server = m.Server.Name,
+            serverId = m.Server.Id,
+            downstreamPrompt = m.Wrapper.PromptName,
+            description = m.Detail.Description,
+            arguments = m.Detail.Arguments,
+            activated = catalog.IsPromptActive(m.Wrapper.ProtocolPrompt.Name, server)
+        }).ToList();
+
+        var hint = matches.Count == 0 && prompts.Count == 0
+            ? "No downstream tool or prompt matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
             : catalog.Mode == WrapperToolMode.Lazy
-                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead."
-                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead.";
+                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name (prompts/list_changed was sent); get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback."
+                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name; get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback.";
 
         return JsonSerializer.Serialize(new
         {
             mode = catalog.Mode.ToString(),
             matches,
+            prompts,
             skippedServers = result.SkippedServers,
             hint
         }, JsonOptions);
@@ -61,7 +73,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "get_service_details")]
-    [Description("Get full tool schemas (including input parameters) and prompt templates for a specific registered MCP server, and add that server's typed '{server}__{tool}' tools to your tool list.")]
+    [Description("Get full tool schemas (including input parameters) and prompt templates for a specific registered MCP server, and add that server's typed '{server}__{tool}' tools and '{server}__{prompt}' prompts to your tool and prompt lists.")]
     public static async Task<string> GetServiceDetails(
         ToolIndex toolIndex,
         WrapperToolCatalog catalog,
@@ -148,26 +160,54 @@ public class ConsumerTools
         => string.IsNullOrEmpty(s) ? "(nothing)" : s.Length <= max ? s : s[..max] + "…";
 
     [McpServerTool(Name = "get_prompt")]
-    [Description("Escape hatch: retrieve a rendered prompt from a downstream MCP server. Returns the prompt description and messages ready for use in a conversation. 'arguments' must be the prompt's argument object encoded as a JSON string.")]
-    public static async Task<string> GetPrompt(
-        ConnectionManager connectionManager,
-        [Description("The name of the registered server")] string serverName,
-        [Description("The name of the prompt to retrieve")] string promptName,
-        [Description("JSON object of string argument values for the prompt template, or null if no arguments needed")] string? arguments = null,
+    [Description("Escape hatch: retrieve a rendered prompt template from a downstream MCP server. Downstream prompts are also exposed as MCP prompts named '{server}__{prompt}' (see find_tools or get_service_details); use those through prompts/get when your client supports prompts, and this tool when it does not. Returns the prompt description and messages ready for use in a conversation. 'arguments' must be the prompt's argument object encoded as a JSON string.")]
+    public static async Task<CallToolResult> GetPrompt(
+        ToolProxyHandler proxy,
+        ServerRegistry registry,
+        [Description("The name of the registered server (from list_services), e.g. 'adjutant'")] string serverName,
+        [Description("The downstream prompt's own name (from get_service_details), e.g. 'plan_release' — not the '{server}__{prompt}' name")] string promptName,
+        [Description("JSON object of string argument values for the prompt template, e.g. \"{\\\"topic\\\": \\\"...\\\"}\", or null if no arguments needed")] string? arguments = null,
         CancellationToken ct = default)
     {
-        IReadOnlyDictionary<string, object?>? args = null;
-        if (!string.IsNullOrWhiteSpace(arguments))
+        if (string.Equals(serverName, registry.SelfName, StringComparison.OrdinalIgnoreCase))
         {
-            var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(arguments);
-            if (raw is not null)
-                args = raw.ToDictionary(kvp => kvp.Key, kvp => (object?)(kvp.Value.GetString() ?? kvp.Value.GetRawText()));
+            return ErrorResult($"'{serverName}' is this aggregator, not a downstream server, and it has no prompts of its own. " +
+                               "Downstream prompts are listed by find_tools and get_service_details.");
         }
 
-        var result = await connectionManager.ExecuteWithRetryAsync<GetPromptResult>(serverName,
-            async (client, token) => await client.GetPromptAsync(promptName, args, cancellationToken: token), ct);
+        try
+        {
+            IReadOnlyDictionary<string, object?>? args = null;
+            if (!string.IsNullOrWhiteSpace(arguments))
+            {
+                var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(arguments);
+                if (raw is not null)
+                    args = raw.ToDictionary(kvp => kvp.Key, kvp => (object?)(kvp.Value.ValueKind == JsonValueKind.String ? kvp.Value.GetString() : kvp.Value.GetRawText()));
+            }
 
-        return JsonSerializer.Serialize(result, JsonOptions);
+            var result = await proxy.GetPromptAsync(serverName, promptName, args, InvocationPath.GetPrompt, ct);
+            return new CallToolResult
+            {
+                Content = [new TextContentBlock { Text = JsonSerializer.Serialize(result, JsonOptions) }]
+            };
+        }
+        catch (ServerNotFoundException ex) when (!ct.IsCancellationRequested)
+        {
+            await registry.EnsureLoadedAsync(ct);
+            var registered = registry.GetAll().Where(s => s.Enabled).Select(s => s.Name).Order(StringComparer.OrdinalIgnoreCase);
+            return ErrorResult($"{ex.Message} Registered servers: [{string.Join(", ", registered)}]. " +
+                               "Re-invoke with one of those as serverName, or call find_tools to locate the prompt.");
+        }
+        catch (AggregatorException ex) when (!ct.IsCancellationRequested)
+        {
+            return ErrorResult(ex.Message);
+        }
+        catch (JsonException ex) when (!ct.IsCancellationRequested)
+        {
+            return ErrorResult(
+                $"'arguments' must be the prompt's argument object encoded as a JSON string, for example " +
+                $"\"{{\\\"topic\\\": \\\"text\\\"}}\". You sent: {Truncate(arguments, 200)}. Parse error: {ex.Message}");
+        }
     }
 
     [McpServerTool(Name = "refresh_service")]
