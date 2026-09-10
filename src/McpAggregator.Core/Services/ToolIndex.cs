@@ -25,7 +25,7 @@ public class ToolIndex
     private readonly ConcurrentDictionary<string, CachedPrompts> _promptCache = new(StringComparer.OrdinalIgnoreCase);
 
     private record CachedTools(List<ToolDetail> Tools, DateTimeOffset FetchedAt, string Fingerprint);
-    private record CachedPrompts(List<PromptDetail> Prompts, DateTimeOffset FetchedAt);
+    private record CachedPrompts(List<PromptDetail> Prompts, DateTimeOffset FetchedAt, string Fingerprint);
 
     /// <summary>
     /// Raised with a server name whenever that server's indexed tool set may have changed: an
@@ -34,6 +34,14 @@ public class ToolIndex
     /// typed wrapper tools in step. Handlers run synchronously on the caller's thread.
     /// </summary>
     public event Action<string>? ToolsChanged;
+
+    /// <summary>
+    /// The prompt counterpart of <see cref="ToolsChanged"/>: raised when a server's indexed prompt
+    /// set may have changed (explicit invalidation, or a TTL re-fetch that returned different
+    /// prompt names or arguments). <see cref="WrapperToolCatalog"/> listens to keep the proxied
+    /// prompts in step.
+    /// </summary>
+    public event Action<string>? PromptsChanged;
 
     public ToolIndex(
         ServerRegistry registry,
@@ -379,7 +387,7 @@ public class ToolIndex
             // call is not re-issued on every service-details fetch.
             _logger.LogDebug(ex, "Server '{Server}' does not support prompts/list; indexing zero prompts", serverName);
             List<PromptDetail> none = [];
-            _promptCache[serverName] = new CachedPrompts(none, DateTimeOffset.UtcNow);
+            StorePrompts(serverName, none);
             return none;
         }
 
@@ -392,12 +400,60 @@ public class ToolIndex
                 Name = a.Name,
                 Description = a.Description,
                 Required = a.Required ?? false
-            }).ToList() ?? []
+            }).ToList() ?? [],
+            WrapperName = WrapperNaming.For(serverName, p.Name),
+            Protocol = p.ProtocolPrompt
         }).ToList();
 
-        _promptCache[serverName] = new CachedPrompts(prompts, DateTimeOffset.UtcNow);
+        StorePrompts(serverName, prompts);
         _logger.LogDebug("Cached {Count} prompts for '{Server}'", prompts.Count, serverName);
         return prompts;
+    }
+
+    private void StorePrompts(string serverName, List<PromptDetail> prompts)
+    {
+        var fingerprint = ComputePromptFingerprint(prompts);
+        var replaced = _promptCache.TryGetValue(serverName, out var previous)
+            && !string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal);
+
+        _promptCache[serverName] = new CachedPrompts(prompts, DateTimeOffset.UtcNow, fingerprint);
+
+        if (replaced)
+        {
+            _logger.LogInformation("Prompt set for '{Server}' changed on refresh", serverName);
+            RaisePromptsChanged(serverName);
+        }
+    }
+
+    /// <summary>
+    /// Name, title, description and serialized arguments per prompt, in name order. Unlike tools,
+    /// a prompt's description is part of what the host shows the user, so it counts.
+    /// </summary>
+    private static string ComputePromptFingerprint(IEnumerable<PromptDetail> prompts)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var p in prompts.OrderBy(p => p.Name, StringComparer.Ordinal))
+        {
+            sb.Append(p.Name).Append('');
+            sb.Append(p.Protocol?.Title ?? string.Empty).Append('');
+            sb.Append(p.Protocol?.Description ?? p.Description ?? string.Empty).Append('');
+            if (p.Protocol?.Arguments is { } args)
+                sb.Append(JsonSerializer.Serialize(args, McpJsonUtilities.DefaultOptions));
+            sb.Append('');
+        }
+        return sb.ToString();
+    }
+
+    private void RaisePromptsChanged(string serverName)
+    {
+        try
+        {
+            PromptsChanged?.Invoke(serverName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "A PromptsChanged handler failed for '{Server}'", serverName);
+        }
     }
 
     public void InvalidateCache(string? serverName = null)
@@ -407,14 +463,18 @@ public class ToolIndex
             _cache.TryRemove(serverName, out _);
             _promptCache.TryRemove(serverName, out _);
             RaiseToolsChanged(serverName);
+            RaisePromptsChanged(serverName);
         }
         else
         {
             var affected = _cache.Keys.ToList();
+            var affectedPrompts = _promptCache.Keys.ToList();
             _cache.Clear();
             _promptCache.Clear();
             foreach (var name in affected)
                 RaiseToolsChanged(name);
+            foreach (var name in affectedPrompts)
+                RaisePromptsChanged(name);
         }
     }
 }

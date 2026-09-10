@@ -105,4 +105,79 @@ public class ToolIndexTests
 
         CollectionAssert.AreEqual(new[] { "alpha" }, raised);
     }
+
+    // ---------------------------------------------------------------- prompts (issue #40)
+
+    [SysDescription("Summarizes text.")]
+    private static string Summarize([SysDescription("Text")] string text) => text;
+
+    [SysDescription("Summarizes text, v2 with a style.")]
+    private static string SummarizeV2([SysDescription("Text")] string text, [SysDescription("Style")] string style) => text + style;
+
+    private static McpServerPrompt Prompt(Delegate method, string name)
+        => McpServerPrompt.Create(method, new McpServerPromptCreateOptions { Name = name });
+
+    [TestMethod]
+    public async Task GetPromptsForServer_PopulatesWrapperNameAndProtocol()
+    {
+        await using var harness = await WrapperHarness.CreateWithPromptsAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [Tool(Echo, "echo")], [Prompt(Summarize, "summarize")]));
+
+        var prompts = await harness.Index.GetPromptsForServerAsync("alpha", TestTimeout);
+
+        Assert.AreEqual(1, prompts.Count);
+        Assert.AreEqual("alpha__summarize", prompts[0].WrapperName);
+        Assert.IsNotNull(prompts[0].Protocol, "The protocol Prompt must be kept for the wrapper.");
+        Assert.AreEqual("summarize", prompts[0].Protocol!.Name);
+        Assert.AreEqual("text", prompts[0].Arguments[0].Name);
+        Assert.IsTrue(prompts[0].Arguments[0].Required);
+    }
+
+    [TestMethod]
+    public async Task InvalidateCache_ForOneServer_RaisesPromptsChangedForIt()
+    {
+        await using var harness = await WrapperHarness.CreateWithPromptsAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [Tool(Echo, "echo")], [Prompt(Summarize, "summarize")]),
+            ("beta", [Tool(Echo, "echo")], [Prompt(Summarize, "summarize")]));
+        var raised = new List<string>();
+        harness.Index.PromptsChanged += name => raised.Add(name);
+
+        harness.Index.InvalidateCache("alpha");
+
+        CollectionAssert.AreEqual(new[] { "alpha" }, raised);
+    }
+
+    [TestMethod]
+    public async Task Refetch_AfterTtlExpiry_RaisesPromptsChangedOnlyWhenThePromptSetDiffers()
+    {
+        await using var harness = await WrapperHarness.CreateWithPromptsAsync(_dataDir, WrapperToolMode.Eager,
+            o => o.IndexCacheTtl = TimeSpan.Zero,
+            ("alpha", [Tool(Echo, "echo")], [Prompt(Summarize, "summarize")]));
+
+        await harness.Index.GetPromptsForServerAsync("alpha", TestTimeout);
+        var raised = new List<string>();
+        harness.Index.PromptsChanged += name => raised.Add(name);
+
+        await harness.Index.GetPromptsForServerAsync("alpha", TestTimeout);
+        Assert.AreEqual(0, raised.Count, "An unchanged prompt set must not raise.");
+
+        var downstream = harness.DownstreamPrompts["alpha"];
+        downstream.Remove(downstream["summarize"]);
+        downstream.Add(Prompt(SummarizeV2, "summarize"));
+
+        await harness.Index.GetPromptsForServerAsync("alpha", TestTimeout);
+
+        CollectionAssert.AreEqual(new[] { "alpha" }, raised);
+    }
+
+    [TestMethod]
+    public async Task ServerWithoutPromptSupport_IndexesZeroPrompts_WithWrapperNamesUntouched()
+    {
+        await using var harness = await WrapperHarness.CreateWithPromptsAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [Tool(Echo, "echo")], null));
+
+        var prompts = await harness.Index.GetPromptsForServerAsync("alpha", TestTimeout);
+
+        Assert.AreEqual(0, prompts.Count);
+    }
 }

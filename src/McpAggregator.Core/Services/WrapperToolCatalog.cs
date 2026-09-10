@@ -10,36 +10,45 @@ using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Services;
 
-/// <summary>One <c>find_tools</c> hit.</summary>
+/// <summary>One <c>find_tools</c> tool hit.</summary>
 public sealed record FindToolsMatch(DownstreamToolWrapper Wrapper, RegisteredServer Server, ToolDetail Detail, int Score);
 
+/// <summary>One <c>find_tools</c> prompt hit.</summary>
+public sealed record FindPromptsMatch(DownstreamPromptWrapper Wrapper, RegisteredServer Server, PromptDetail Detail, int Score);
+
 /// <summary>Result of <see cref="WrapperToolCatalog.FindAsync"/>.</summary>
-/// <param name="Matches">Best matches first.</param>
+/// <param name="Matches">Best tool matches first.</param>
 /// <param name="SkippedServers">Enabled servers whose tools could not be listed, with the reason.</param>
-public sealed record FindToolsResult(IReadOnlyList<FindToolsMatch> Matches, IReadOnlyList<string> SkippedServers);
+/// <param name="Prompts">Best prompt matches first.</param>
+public sealed record FindToolsResult(
+    IReadOnlyList<FindToolsMatch> Matches,
+    IReadOnlyList<string> SkippedServers,
+    IReadOnlyList<FindPromptsMatch> Prompts);
 
 /// <summary>
-/// Owns the typed wrapper tools (<c>{server}__{tool}</c>) the aggregator exposes for downstream
-/// tools.
+/// Owns the typed wrapper tools (<c>{server}__{tool}</c>) and the proxied prompts
+/// (<c>{server}__{prompt}</c>) the aggregator exposes for downstream tools and prompts.
 /// <para>
 /// In <see cref="WrapperToolMode.Eager"/> mode every wrapper of every enabled server is kept in
-/// the process-wide <see cref="McpServerOptions.ToolCollection"/>; the SDK server watches that
-/// collection and sends <c>notifications/tools/list_changed</c> itself.
+/// the process-wide <see cref="McpServerOptions.ToolCollection"/> /
+/// <see cref="McpServerOptions.PromptCollection"/>; the SDK server watches those collections and
+/// sends <c>notifications/tools/list_changed</c> / <c>notifications/prompts/list_changed</c> itself.
 /// </para>
 /// <para>
-/// In <see cref="WrapperToolMode.Lazy"/> mode the shared collection is never touched. Activation
+/// In <see cref="WrapperToolMode.Lazy"/> mode the shared collections are never touched. Activation
 /// is <b>per session</b>: <c>find_tools</c> and <c>get_service_details</c> record the wrappers for
-/// the calling <see cref="McpServer"/> only, the aggregator's <c>tools/list</c> handler appends
-/// that session's wrappers, and the <c>tools/call</c> fallback dispatches any wrapper by name
-/// whether or not it is listed. One client's discovery therefore never enlarges another client's
-/// tool list (which is the whole point of Lazy: not filling context windows with tools nobody
-/// asked for). A session with no memory between requests — stateless HTTP — simply never lists
-/// wrappers and relies on calling them by name.
+/// the calling <see cref="McpServer"/> only, the aggregator's <c>tools/list</c> and
+/// <c>prompts/list</c> handlers append that session's wrappers, and the <c>tools/call</c> /
+/// <c>prompts/get</c> fallbacks dispatch any wrapper by name whether or not it is listed. One
+/// client's discovery therefore never enlarges another client's list (which is the whole point of
+/// Lazy: not filling context windows with tools nobody asked for). A session with no memory
+/// between requests — stateless HTTP — simply never lists wrappers and relies on calling them by
+/// name.
 /// </para>
 /// <para>
-/// Invariant: the catalog only ever adds or removes <see cref="DownstreamToolWrapper"/> instances
-/// in the shared collection, and only in Eager mode. The aggregator's own attributed tools are
-/// never touched.
+/// Invariant: the catalog only ever adds or removes <see cref="DownstreamToolWrapper"/> /
+/// <see cref="DownstreamPromptWrapper"/> instances in the shared collections, and only in Eager
+/// mode. The aggregator's own attributed tools are never touched.
 /// </para>
 /// </summary>
 public sealed class WrapperToolCatalog
@@ -54,6 +63,7 @@ public sealed class WrapperToolCatalog
     // Last built wrapper set per server, keyed by server name. Source of instance reuse only;
     // the index is the source of truth.
     private readonly ConcurrentDictionary<string, IReadOnlyList<DownstreamToolWrapper>> _built = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<DownstreamPromptWrapper>> _builtPrompts = new(StringComparer.OrdinalIgnoreCase);
 
     // Lazy mode: wrappers activated per session. The SDK hands tools a fresh McpServer facade per
     // request, so the facade cannot be the key. What is stable: the session id where the transport
@@ -75,6 +85,7 @@ public sealed class WrapperToolCatalog
     private sealed class SessionActivation
     {
         public ConcurrentDictionary<string, McpServerTool> Tools { get; } = new(StringComparer.Ordinal);
+        public ConcurrentDictionary<string, McpServerPrompt> Prompts { get; } = new(StringComparer.Ordinal);
         public DateTimeOffset LastTouched { get; set; } = DateTimeOffset.UtcNow;
     }
 
@@ -145,6 +156,7 @@ public sealed class WrapperToolCatalog
 
         _registry.RegistryChanged += OnRegistryChanged;
         _toolIndex.ToolsChanged += OnToolsChanged;
+        _toolIndex.PromptsChanged += OnPromptsChanged;
     }
 
     public WrapperToolMode Mode => _options.WrapperMode;
@@ -152,6 +164,10 @@ public sealed class WrapperToolCatalog
     /// <summary>The wrapper tools currently in the shared, process-wide tool list (Eager mode).</summary>
     public IReadOnlyList<DownstreamToolWrapper> ActiveWrappers
         => ToolCollection.OfType<DownstreamToolWrapper>().ToList();
+
+    /// <summary>The proxied prompts currently in the shared, process-wide prompt list (Eager mode).</summary>
+    public IReadOnlyList<DownstreamPromptWrapper> ActivePromptWrappers
+        => PromptCollection.OfType<DownstreamPromptWrapper>().ToList();
 
     /// <summary>The administrative tools (listed in Eager mode; disclosed per session in Lazy mode).</summary>
     public IReadOnlyList<McpServerTool> AdminTools => _adminTools.Tools;
@@ -186,6 +202,15 @@ public sealed class WrapperToolCatalog
             // AddAggregatorMcpServer pre-assigns this; the fallback only matters for a catalog
             // constructed outside that wiring.
             return options.ToolCollection ??= [];
+        }
+    }
+
+    private McpServerPrimitiveCollection<McpServerPrompt> PromptCollection
+    {
+        get
+        {
+            var options = _mcpServerOptions.Value;
+            return options.PromptCollection ??= [];
         }
     }
 
@@ -265,13 +290,89 @@ public sealed class WrapperToolCatalog
         return wrappers.FirstOrDefault(w => string.Equals(w.ProtocolTool.Name, wrapperName, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Builds (or reuses) the proxied prompt set for one server from the index. A wrapper instance
+    /// is reused when its name and argument fingerprint are unchanged so the prompt collection is
+    /// not churned by a refresh that changed nothing. A server without prompt support yields an
+    /// empty list.
+    /// </summary>
+    public async Task<IReadOnlyList<DownstreamPromptWrapper>> GetPromptWrappersAsync(string serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var server = _registry.Get(serverName);
+        var prompts = await _toolIndex.GetPromptsForServerAsync(server.Name, ct);
+
+        var previous = _builtPrompts.TryGetValue(server.Name, out var existing)
+            ? existing.ToDictionary(w => w.ProtocolPrompt.Name, StringComparer.Ordinal)
+            : new Dictionary<string, DownstreamPromptWrapper>(StringComparer.Ordinal);
+
+        var wrappers = new List<DownstreamPromptWrapper>(prompts.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var prompt in prompts)
+        {
+            if (prompt.Protocol is null)
+                continue;
+
+            var name = WrapperNaming.For(server.Name, prompt.Name);
+            if (!seen.Add(name))
+            {
+                _logger.LogWarning(
+                    "Two prompts on '{Server}' map to the same name '{Wrapper}' after sanitization; keeping the first",
+                    server.Name, name);
+                continue;
+            }
+
+            var fingerprint = DownstreamPromptWrapper.Fingerprint(prompt.Protocol);
+            if (previous.TryGetValue(name, out var reusable)
+                && string.Equals(reusable.ArgumentsFingerprint, fingerprint, StringComparison.Ordinal)
+                && string.Equals(reusable.ServerId, server.Id, StringComparison.Ordinal))
+            {
+                wrappers.Add(reusable);
+                continue;
+            }
+
+            if (name.Length > WrapperNaming.HostNameLengthLimit && _warnedLongNames.TryAdd(name, 0))
+            {
+                _logger.LogWarning(
+                    "Prompt name '{Wrapper}' is {Length} characters; hosts that cap prompt names at {Limit} may drop it",
+                    name, name.Length, WrapperNaming.HostNameLengthLimit);
+            }
+
+            wrappers.Add(new DownstreamPromptWrapper(server, prompt.Protocol, _proxy, _logger));
+        }
+
+        _builtPrompts[server.Name] = wrappers;
+        return wrappers;
+    }
+
+    /// <summary>
+    /// Resolves a proxied prompt by its <c>{server}__{prompt}</c> name against the live index,
+    /// whether or not it is listed anywhere. Null when the name does not parse, the server is
+    /// unknown or disabled, or the server has no such prompt. Throws when the server is registered
+    /// and enabled but cannot be reached.
+    /// </summary>
+    public async Task<DownstreamPromptWrapper?> ResolvePromptAsync(string wrapperName, CancellationToken ct = default)
+    {
+        if (!WrapperNaming.TryParse(wrapperName, out var serverName, out _))
+            return null;
+
+        await _registry.EnsureLoadedAsync(ct);
+        if (!_registry.TryGet(serverName, out var server) || server is null || !server.Enabled)
+            return null;
+
+        var wrappers = await GetPromptWrappersAsync(server.Name, ct);
+        return wrappers.FirstOrDefault(w => string.Equals(w.ProtocolPrompt.Name, wrapperName, StringComparison.Ordinal));
+    }
+
     // ---------------------------------------------------------------- search
 
     /// <summary>
-    /// Searches every enabled server's tools for <paramref name="query"/>. An exact tool or wrapper
-    /// name match ranks first, then token hits on the tool name, wrapper name, description and
-    /// server metadata. In <see cref="WrapperToolMode.Lazy"/> mode the returned matches are
-    /// activated for <paramref name="session"/> before this returns.
+    /// Searches every enabled server's tools and prompts for <paramref name="query"/>. An exact
+    /// name match ranks first, then token hits on the downstream name, wrapper name, description
+    /// and server metadata. <paramref name="limit"/> applies to tools and prompts separately. In
+    /// <see cref="WrapperToolMode.Lazy"/> mode the returned matches are activated for
+    /// <paramref name="session"/> before this returns.
     /// </summary>
     public async Task<FindToolsResult> FindAsync(string query, int limit, McpServer? session, CancellationToken ct = default)
     {
@@ -280,9 +381,10 @@ public sealed class WrapperToolCatalog
         var normalizedQuery = Normalize(query);
         var tokens = Tokenize(query);
         if (tokens.Count == 0)
-            return new FindToolsResult([], []);
+            return new FindToolsResult([], [], []);
 
         var matches = new List<FindToolsMatch>();
+        var promptMatches = new List<FindPromptsMatch>();
         var skipped = new List<string>();
 
         foreach (var server in _registry.GetAll().Where(s => s.Enabled).OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
@@ -308,9 +410,36 @@ public sealed class WrapperToolCatalog
                 if (!detailByName.TryGetValue(wrapper.ToolName, out var detail))
                     continue;
 
-                var score = Score(normalizedQuery, tokens, wrapper, server, detail);
+                var score = Score(normalizedQuery, tokens, wrapper.ProtocolTool.Name, wrapper.ToolName, detail.Description, server);
                 if (score > 0)
                     matches.Add(new FindToolsMatch(wrapper, server, detail, score));
+            }
+
+            // Prompts are best-effort: the server is reachable (its tools listed), so a prompt
+            // failure here is a fact about its prompt support, not a reason to skip the server.
+            IReadOnlyList<DownstreamPromptWrapper> promptWrappers;
+            List<PromptDetail> promptDetails;
+            try
+            {
+                promptWrappers = await GetPromptWrappersAsync(server.Name, ct);
+                promptDetails = await _toolIndex.GetPromptsForServerAsync(server.Name, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "find_tools could not list prompts on '{Server}': {Message}", server.Name, ex.Message);
+                continue;
+            }
+
+            var promptByName = promptDetails.ToDictionary(d => d.Name, StringComparer.Ordinal);
+
+            foreach (var wrapper in promptWrappers)
+            {
+                if (!promptByName.TryGetValue(wrapper.PromptName, out var detail))
+                    continue;
+
+                var score = Score(normalizedQuery, tokens, wrapper.ProtocolPrompt.Name, wrapper.PromptName, detail.Description, server);
+                if (score > 0)
+                    promptMatches.Add(new FindPromptsMatch(wrapper, server, detail, score));
             }
         }
 
@@ -320,10 +449,19 @@ public sealed class WrapperToolCatalog
             .Take(Math.Max(1, limit))
             .ToList();
 
+        var topPrompts = promptMatches
+            .OrderByDescending(m => m.Score)
+            .ThenBy(m => m.Wrapper.ProtocolPrompt.Name, StringComparer.Ordinal)
+            .Take(Math.Max(1, limit))
+            .ToList();
+
         if (top.Count > 0)
             await ActivateAsync(session, top.Select(m => m.Wrapper), ct);
 
-        return new FindToolsResult(top, skipped);
+        if (topPrompts.Count > 0)
+            await ActivatePromptsAsync(session, topPrompts.Select(m => m.Wrapper), ct);
+
+        return new FindToolsResult(top, skipped, topPrompts);
     }
 
     // ---------------------------------------------------------------- per-session activation (Lazy)
@@ -370,11 +508,65 @@ public sealed class WrapperToolCatalog
         }
     }
 
-    /// <summary>Lazy mode: activates every wrapper of one server for <paramref name="session"/>.</summary>
+    /// <summary>
+    /// Lazy mode: makes the prompts part of <paramref name="session"/>'s prompt list and tells that
+    /// session the list changed. No-op in Eager mode and when there is no session to remember it for.
+    /// </summary>
+    public async Task ActivatePromptsAsync(McpServer? session, IEnumerable<McpServerPrompt> prompts, CancellationToken ct = default)
+    {
+        if (Mode != WrapperToolMode.Lazy)
+            return;
+
+        var state = GetOrCreateSession(session);
+        if (state is null)
+            return;
+
+        var added = 0;
+        foreach (var prompt in prompts)
+        {
+            if (state.Prompts.TryAdd(prompt.ProtocolPrompt.Name, prompt))
+                added++;
+            else
+                state.Prompts[prompt.ProtocolPrompt.Name] = prompt; // refreshed instance
+        }
+
+        if (added == 0)
+            return;
+
+        _logger.LogInformation("Activated {Count} prompt(s) for a session ({Total} active in it)", added, state.Prompts.Count);
+
+        try
+        {
+            await session!.SendNotificationAsync(NotificationMethods.PromptListChangedNotification, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not send prompts/list_changed to the session");
+        }
+    }
+
+    /// <summary>
+    /// Lazy mode: activates every wrapper tool and proxied prompt of one server for
+    /// <paramref name="session"/>. Prompts are best-effort: a server whose tools listed but whose
+    /// prompts cannot be fetched still gets its tools activated.
+    /// </summary>
     public async Task ActivateServerAsync(McpServer? session, string serverName, CancellationToken ct = default)
     {
         var wrappers = await GetWrappersAsync(serverName, ct);
         await ActivateAsync(session, wrappers, ct);
+
+        IReadOnlyList<DownstreamPromptWrapper> prompts;
+        try
+        {
+            prompts = await GetPromptWrappersAsync(serverName, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not list prompts on '{Server}' for activation: {Message}", serverName, ex.Message);
+            return;
+        }
+
+        await ActivatePromptsAsync(session, prompts, ct);
     }
 
     /// <summary>Lazy mode: discloses the administrative tools to <paramref name="session"/>.</summary>
@@ -391,6 +583,17 @@ public sealed class WrapperToolCatalog
     public bool IsActive(string toolName, McpServer? session)
         => ToolCollection.TryGetPrimitive(toolName, out _)
            || (TryGetSession(session) is { } state && state.Tools.ContainsKey(toolName));
+
+    /// <summary>The prompts activated for <paramref name="session"/> (Lazy mode); empty otherwise.</summary>
+    public IReadOnlyList<McpServerPrompt> ActivatedPromptsFor(McpServer? session)
+        => TryGetSession(session) is { } state
+            ? state.Prompts.Values.OrderBy(p => p.ProtocolPrompt.Name, StringComparer.Ordinal).ToList()
+            : [];
+
+    /// <summary>True when this prompt name is in <paramref name="session"/>'s prompt list right now.</summary>
+    public bool IsPromptActive(string promptName, McpServer? session)
+        => PromptCollection.TryGetPrimitive(promptName, out _)
+           || (TryGetSession(session) is { } state && state.Prompts.ContainsKey(promptName));
 
     // ---------------------------------------------------------------- unknown-tool hint
 
@@ -486,6 +689,7 @@ public sealed class WrapperToolCatalog
             PruneState(enabledNames);
 
             var desired = new Dictionary<string, DownstreamToolWrapper>(StringComparer.Ordinal);
+            var desiredPrompts = new Dictionary<string, DownstreamPromptWrapper>(StringComparer.Ordinal);
 
             if (Mode == WrapperToolMode.Eager)
             {
@@ -500,6 +704,7 @@ public sealed class WrapperToolCatalog
                     {
                         _logger.LogWarning(ex, "Skipping wrapper tools for '{Server}' (unavailable): {Message}", server.Name, ex.Message);
                         _built.TryRemove(server.Name, out _);
+                        _builtPrompts.TryRemove(server.Name, out _);
                         continue;
                     }
 
@@ -512,49 +717,45 @@ public sealed class WrapperToolCatalog
                                 wrapper.ProtocolTool.Name);
                         }
                     }
-                }
-            }
 
-            var collection = ToolCollection;
-            var added = 0;
-            var removed = 0;
-
-            using (collection.DeferChangedEvents())
-            {
-                foreach (var current in collection.OfType<DownstreamToolWrapper>().ToList())
-                {
-                    if (!desired.TryGetValue(current.ProtocolTool.Name, out var wanted) || !ReferenceEquals(wanted, current))
+                    IReadOnlyList<DownstreamPromptWrapper> promptWrappers;
+                    try
                     {
-                        if (collection.Remove(current))
-                            removed++;
+                        promptWrappers = await GetPromptWrappersAsync(server.Name, ct);
                     }
-                }
-
-                foreach (var wrapper in desired.Values)
-                {
-                    if (collection.TryGetPrimitive(wrapper.ProtocolTool.Name, out var existing))
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        if (ReferenceEquals(existing, wrapper))
-                            continue;
-
-                        // A non-wrapper tool already owns this name. Never displace the
-                        // aggregator's own tools.
-                        _logger.LogWarning(
-                            "Wrapper '{Wrapper}' collides with an aggregator tool of the same name and was not added",
-                            wrapper.ProtocolTool.Name);
+                        _logger.LogWarning(ex, "Skipping prompts for '{Server}': {Message}", server.Name, ex.Message);
+                        _builtPrompts.TryRemove(server.Name, out _);
                         continue;
                     }
 
-                    if (collection.TryAdd(wrapper))
-                        added++;
+                    foreach (var wrapper in promptWrappers)
+                    {
+                        if (!desiredPrompts.TryAdd(wrapper.ProtocolPrompt.Name, wrapper))
+                        {
+                            _logger.LogWarning(
+                                "Prompt name '{Wrapper}' is claimed by more than one server; keeping the first",
+                                wrapper.ProtocolPrompt.Name);
+                        }
+                    }
                 }
             }
 
+            var (added, removed) = Reconcile(ToolCollection, desired, w => w.ProtocolTool.Name, "tool");
             if (added > 0 || removed > 0)
             {
                 _logger.LogInformation(
                     "Wrapper tools synced ({Mode}): +{Added} -{Removed}, {Active} active",
                     Mode, added, removed, desired.Count);
+            }
+
+            var (promptsAdded, promptsRemoved) = Reconcile(PromptCollection, desiredPrompts, w => w.ProtocolPrompt.Name, "prompt");
+            if (promptsAdded > 0 || promptsRemoved > 0)
+            {
+                _logger.LogInformation(
+                    "Proxied prompts synced ({Mode}): +{Added} -{Removed}, {Active} active",
+                    Mode, promptsAdded, promptsRemoved, desiredPrompts.Count);
             }
         }
         finally
@@ -563,15 +764,71 @@ public sealed class WrapperToolCatalog
         }
     }
 
+    /// <summary>
+    /// Brings the wrapper entries of one shared collection in line with <paramref name="desired"/>
+    /// under a single <c>Changed</c> deferral. Only <typeparamref name="TWrapper"/> instances are
+    /// ever removed; a non-wrapper primitive that owns a desired name is left alone.
+    /// </summary>
+    private (int Added, int Removed) Reconcile<TPrimitive, TWrapper>(
+        McpServerPrimitiveCollection<TPrimitive> collection,
+        Dictionary<string, TWrapper> desired,
+        Func<TWrapper, string> nameOf,
+        string kind)
+        where TPrimitive : IMcpServerPrimitive
+        where TWrapper : TPrimitive
+    {
+        var added = 0;
+        var removed = 0;
+
+        using (collection.DeferChangedEvents())
+        {
+            foreach (var current in collection.OfType<TWrapper>().ToList())
+            {
+                if (!desired.TryGetValue(nameOf(current), out var wanted) || !ReferenceEquals(wanted, current))
+                {
+                    if (collection.Remove(current))
+                        removed++;
+                }
+            }
+
+            foreach (var wrapper in desired.Values)
+            {
+                if (collection.TryGetPrimitive(nameOf(wrapper), out var existing))
+                {
+                    if (ReferenceEquals(existing, wrapper))
+                        continue;
+
+                    // A non-wrapper primitive already owns this name. Never displace the
+                    // aggregator's own.
+                    _logger.LogWarning(
+                        "Wrapper '{Wrapper}' collides with an aggregator {Kind} of the same name and was not added",
+                        nameOf(wrapper), kind);
+                    continue;
+                }
+
+                if (collection.TryAdd(wrapper))
+                    added++;
+            }
+        }
+
+        return (added, removed);
+    }
+
     private void PruneState(HashSet<string> enabledNames)
     {
         foreach (var key in _built.Keys.Where(k => !enabledNames.Contains(k)).ToList())
             _built.TryRemove(key, out _);
 
+        foreach (var key in _builtPrompts.Keys.Where(k => !enabledNames.Contains(k)).ToList())
+            _builtPrompts.TryRemove(key, out _);
+
         foreach (var state in AllSessions())
         {
             foreach (var kvp in state.Tools.Where(kvp => kvp.Value is DownstreamToolWrapper w && !enabledNames.Contains(w.ServerName)).ToList())
                 state.Tools.TryRemove(kvp.Key, out _);
+
+            foreach (var kvp in state.Prompts.Where(kvp => kvp.Value is DownstreamPromptWrapper w && !enabledNames.Contains(w.ServerName)).ToList())
+                state.Prompts.TryRemove(kvp.Key, out _);
         }
     }
 
@@ -599,6 +856,9 @@ public sealed class WrapperToolCatalog
         // or call; the shared collection is reconciled here.
         ScheduleSync($"tools changed for '{serverName}'");
     }
+
+    private void OnPromptsChanged(string serverName)
+        => ScheduleSync($"prompts changed for '{serverName}'");
 
     /// <summary>
     /// Fire-and-forget resync. Requests that arrive before the queued sync starts are coalesced;
@@ -652,12 +912,16 @@ public sealed class WrapperToolCatalog
         return tokens.Distinct(StringComparer.Ordinal).ToList();
     }
 
-    private static int Score(string normalizedQuery, List<string> tokens, DownstreamToolWrapper wrapper, RegisteredServer server, ToolDetail detail)
+    /// <summary>
+    /// Scores one tool or prompt: <paramref name="wrapperFullName"/> is its <c>{server}__{name}</c>
+    /// name and <paramref name="downstreamName"/> the downstream's own name.
+    /// </summary>
+    private static int Score(string normalizedQuery, List<string> tokens, string wrapperFullName, string downstreamName, string? detailDescription, RegisteredServer server)
     {
-        var wrapperName = wrapper.ProtocolTool.Name.ToLowerInvariant();
-        var toolName = wrapper.ToolName.ToLowerInvariant();
-        var toolNameTokens = Tokenize(wrapper.ToolName);
-        var description = (detail.Description ?? string.Empty).ToLowerInvariant();
+        var wrapperName = wrapperFullName.ToLowerInvariant();
+        var toolName = downstreamName.ToLowerInvariant();
+        var toolNameTokens = Tokenize(downstreamName);
+        var description = (detailDescription ?? string.Empty).ToLowerInvariant();
         var serverText = string.Join(' ', server.Name, server.DisplayName ?? string.Empty,
             server.AiSummary ?? server.Description ?? string.Empty).ToLowerInvariant();
 

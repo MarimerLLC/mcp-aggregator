@@ -392,4 +392,128 @@ public class WrapperToolCatalogTests
 
         CollectionAssert.AreEqual(new[] { "onedrive-marimer__list_files" }, harness.WrapperNames);
     }
+
+    // ---------------------------------------------------------------- prompts (issue #40)
+
+    [SysDescription("Summarizes text.")]
+    private static string Summarize([SysDescription("Text")] string text) => text;
+
+    [SysDescription("Summarizes text, v2 with a style.")]
+    private static string SummarizeV2([SysDescription("Text")] string text, [SysDescription("Style")] string style) => text + style;
+
+    [SysDescription("Drafts a release plan.")]
+    private static string PlanRelease([SysDescription("Version")] string version) => version;
+
+    private static McpServerPrompt Prompt(Delegate method, string name)
+        => McpServerPrompt.Create(method, new McpServerPromptCreateOptions { Name = name });
+
+    private Task<WrapperHarness> PromptServersAsync(WrapperToolMode mode)
+        => WrapperHarness.CreateWithPromptsAsync(_dataDir, mode,
+            ("docs", [Tool(SearchDocs, "search_docs")], [Prompt(Summarize, "summarize"), Prompt(PlanRelease, "plan_release")]),
+            ("toolsonly", [Tool(Echo, "echo")], null));
+
+    [TestMethod]
+    public async Task Eager_Sync_PopulatesPromptCollection_AndLeavesTheSentinelAlone()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Eager);
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        CollectionAssert.AreEqual(new[] { "docs__plan_release", "docs__summarize" }, harness.PromptWrapperNames);
+        Assert.IsTrue(harness.PromptCollection.Contains(harness.SentinelPrompt), "Non-wrapper prompts must be left alone.");
+        CollectionAssert.AreEqual(new[] { "docs__search_docs", "toolsonly__echo" }, harness.WrapperNames,
+            "A server without prompt support still contributes its tools.");
+    }
+
+    [TestMethod]
+    public async Task Eager_Sync_RaisesExactlyOneChangedEventOnThePromptCollection()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Eager);
+        var changed = 0;
+        harness.PromptCollection.Changed += (_, _) => Interlocked.Increment(ref changed);
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+        Assert.AreEqual(1, changed, "Two adds must be batched into one Changed (one prompts/list_changed).");
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+        Assert.AreEqual(1, changed, "A sync that changes nothing must not raise Changed.");
+    }
+
+    [TestMethod]
+    public async Task Eager_DisablingAServer_RemovesItsPrompts()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Eager);
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        await harness.Registry.SetEnabledAsync("docs", false);
+        await harness.Catalog.PendingSync;
+
+        Assert.AreEqual(0, harness.PromptWrapperNames.Count);
+        Assert.IsTrue(harness.PromptCollection.Contains(harness.SentinelPrompt));
+    }
+
+    [TestMethod]
+    public async Task Lazy_Sync_LeavesThePromptCollectionUntouched()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Lazy);
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        Assert.AreEqual(0, harness.PromptWrapperNames.Count);
+        Assert.AreEqual(1, harness.PromptCollection.Count);
+    }
+
+    [TestMethod]
+    public async Task InvalidateCache_RebuildsThePromptWrapperWhenItsArgumentsChanged()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Eager);
+        await harness.Catalog.SyncAsync(TestTimeout);
+        var before = harness.Catalog.ActivePromptWrappers.Single(w => w.PromptName == "summarize");
+
+        var downstream = harness.DownstreamPrompts["docs"];
+        downstream.Remove(downstream["summarize"]);
+        downstream.Add(Prompt(SummarizeV2, "summarize"));
+
+        harness.Index.InvalidateCache("docs");
+        await harness.Catalog.PendingSync;
+
+        var after = harness.Catalog.ActivePromptWrappers.Single(w => w.PromptName == "summarize");
+        Assert.AreNotSame(before, after);
+        Assert.AreNotEqual(before.ArgumentsFingerprint, after.ArgumentsFingerprint);
+        Assert.AreEqual(2, after.ProtocolPrompt.Arguments!.Count);
+        Assert.AreSame(
+            harness.Catalog.ActivePromptWrappers.Single(w => w.PromptName == "plan_release"),
+            harness.Catalog.ActivePromptWrappers.Single(w => w.PromptName == "plan_release"),
+            "Unchanged prompts keep their instance.");
+    }
+
+    [TestMethod]
+    public async Task FindAsync_ReturnsAndActivatesMatchingPrompts()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Lazy);
+        await using var session = harness.NewSession();
+
+        var result = await harness.Catalog.FindAsync("release plan", 10, session.Server, TestTimeout);
+
+        Assert.AreEqual(0, result.Matches.Count, "No tool talks about releases.");
+        Assert.AreEqual("docs__plan_release", result.Prompts.Single().Wrapper.ProtocolPrompt.Name);
+        CollectionAssert.AreEqual(new[] { "docs__plan_release" },
+            harness.Catalog.ActivatedPromptsFor(session.Server).Select(p => p.ProtocolPrompt.Name).ToList());
+        Assert.IsTrue(harness.Catalog.IsPromptActive("docs__plan_release", session.Server));
+        Assert.AreEqual(0, harness.Catalog.ActivatedFor(session.Server).Count, "No tool was activated.");
+    }
+
+    [TestMethod]
+    public async Task ResolvePromptAsync_FindsAnUnlistedPromptByName_AndRejectsUnknownOnes()
+    {
+        await using var harness = await PromptServersAsync(WrapperToolMode.Lazy);
+
+        var found = await harness.Catalog.ResolvePromptAsync("docs__summarize", TestTimeout);
+        Assert.IsNotNull(found);
+        Assert.AreEqual("summarize", found.PromptName);
+
+        Assert.IsNull(await harness.Catalog.ResolvePromptAsync("docs__nope", TestTimeout));
+        Assert.IsNull(await harness.Catalog.ResolvePromptAsync("nosuchserver__summarize", TestTimeout));
+        Assert.IsNull(await harness.Catalog.ResolvePromptAsync("noseparator", TestTimeout));
+    }
 }

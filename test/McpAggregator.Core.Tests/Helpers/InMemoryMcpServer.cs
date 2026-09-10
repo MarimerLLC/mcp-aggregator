@@ -29,7 +29,13 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     /// install request filters or other server-side behavior.
     /// </param>
     public InMemoryMcpServer(string name, Action<McpServerOptions>? configureOptions, params McpServerTool[] tools)
-        : this(name, BuildOptions(name, configureOptions, tools), services: null)
+        : this(name, BuildOptions(name, configureOptions, tools, prompts: null), services: null)
+    {
+    }
+
+    /// <summary>A downstream that serves prompts as well as tools (issue #40).</summary>
+    public InMemoryMcpServer(string name, IEnumerable<McpServerPrompt> prompts, params McpServerTool[] tools)
+        : this(name, BuildOptions(name, configureOptions: null, tools, prompts), services: null)
     {
     }
 
@@ -57,7 +63,7 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     public static InMemoryMcpServer Host(string name, McpServerOptions options, IServiceProvider? services = null)
         => new(name, options, services);
 
-    private static McpServerOptions BuildOptions(string name, Action<McpServerOptions>? configureOptions, McpServerTool[] tools)
+    private static McpServerOptions BuildOptions(string name, Action<McpServerOptions>? configureOptions, McpServerTool[] tools, IEnumerable<McpServerPrompt>? prompts)
     {
         var toolCollection = new McpServerPrimitiveCollection<McpServerTool>();
         foreach (var tool in tools)
@@ -68,6 +74,16 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
             ServerInfo = new Implementation { Name = name, Version = "1.0.0" },
             ToolCollection = toolCollection
         };
+
+        if (prompts is not null)
+        {
+            // A non-null collection is what makes the SDK advertise the prompts capability, so a
+            // tools-only double keeps it null and stays a server "without prompt support".
+            var promptCollection = new McpServerPrimitiveCollection<McpServerPrompt>();
+            foreach (var prompt in prompts)
+                promptCollection.Add(prompt);
+            options.PromptCollection = promptCollection;
+        }
 
         configureOptions?.Invoke(options);
         return options;

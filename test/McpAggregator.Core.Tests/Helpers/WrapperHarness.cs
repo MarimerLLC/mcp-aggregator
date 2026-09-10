@@ -34,10 +34,21 @@ internal sealed class WrapperHarness : IAsyncDisposable
     public WrapperToolCatalog Catalog { get; private set; } = null!;
     public Dictionary<string, McpServerPrimitiveCollection<McpServerTool>> DownstreamTools { get; private set; } = null!;
 
+    /// <summary>
+    /// Live prompt sets per downstream. Only downstreams created with prompts have an entry; the
+    /// others are hosted without a prompt collection and so report no prompt support.
+    /// </summary>
+    public Dictionary<string, McpServerPrimitiveCollection<McpServerPrompt>> DownstreamPrompts { get; private set; } = null!;
+
     /// <summary>A non-wrapper tool that lives in the aggregator's collection; the catalog must never touch it.</summary>
     public McpServerTool Sentinel { get; private set; } = null!;
 
+    /// <summary>A non-wrapper prompt that lives in the aggregator's prompt collection; the catalog must never touch it.</summary>
+    public McpServerPrompt SentinelPrompt { get; private set; } = null!;
+
     public McpServerPrimitiveCollection<McpServerTool> ToolCollection => McpOptions.ToolCollection!;
+
+    public McpServerPrimitiveCollection<McpServerPrompt> PromptCollection => McpOptions.PromptCollection!;
 
     private readonly List<InMemoryMcpServer> _sessions = [];
 
@@ -53,6 +64,7 @@ internal sealed class WrapperHarness : IAsyncDisposable
         {
             ServerInfo = McpOptions.ServerInfo,
             ToolCollection = McpOptions.ToolCollection,
+            PromptCollection = McpOptions.PromptCollection,
         };
         var session = InMemoryMcpServer.Host("aggregator", options);
         lock (_spawnLock) _sessions.Add(session);
@@ -62,17 +74,42 @@ internal sealed class WrapperHarness : IAsyncDisposable
     public List<string> WrapperNames
         => ToolCollection.OfType<DownstreamToolWrapper>().Select(w => w.ProtocolTool.Name).Order(StringComparer.Ordinal).ToList();
 
+    public List<string> PromptWrapperNames
+        => PromptCollection.OfType<DownstreamPromptWrapper>().Select(w => w.ProtocolPrompt.Name).Order(StringComparer.Ordinal).ToList();
+
     public static Task<WrapperHarness> CreateAsync(
         string dataDir,
         WrapperToolMode mode,
         params (string Name, McpServerTool[] Tools)[] downstreams)
         => CreateAsync(dataDir, mode, configure: null, downstreams);
 
-    public static async Task<WrapperHarness> CreateAsync(
+    public static Task<WrapperHarness> CreateAsync(
         string dataDir,
         WrapperToolMode mode,
         Action<AggregatorOptions>? configure,
         params (string Name, McpServerTool[] Tools)[] downstreams)
+        => CreateCoreAsync(dataDir, mode, configure,
+            downstreams.Select(d => (d.Name, d.Tools, (McpServerPrompt[]?)null)).ToArray());
+
+    /// <summary>Downstreams that serve prompts as well as tools (issue #40). A null prompt array means "no prompt support".</summary>
+    public static Task<WrapperHarness> CreateWithPromptsAsync(
+        string dataDir,
+        WrapperToolMode mode,
+        params (string Name, McpServerTool[] Tools, McpServerPrompt[]? Prompts)[] downstreams)
+        => CreateCoreAsync(dataDir, mode, configure: null, downstreams);
+
+    public static Task<WrapperHarness> CreateWithPromptsAsync(
+        string dataDir,
+        WrapperToolMode mode,
+        Action<AggregatorOptions>? configure,
+        params (string Name, McpServerTool[] Tools, McpServerPrompt[]? Prompts)[] downstreams)
+        => CreateCoreAsync(dataDir, mode, configure, downstreams);
+
+    private static async Task<WrapperHarness> CreateCoreAsync(
+        string dataDir,
+        WrapperToolMode mode,
+        Action<AggregatorOptions>? configure,
+        (string Name, McpServerTool[] Tools, McpServerPrompt[]? Prompts)[] downstreams)
     {
         var harness = new WrapperHarness();
 
@@ -95,18 +132,28 @@ internal sealed class WrapperHarness : IAsyncDisposable
         await harness.Registry.EnsureLoadedAsync();
 
         harness.DownstreamTools = new Dictionary<string, McpServerPrimitiveCollection<McpServerTool>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (name, tools) in downstreams)
+        harness.DownstreamPrompts = new Dictionary<string, McpServerPrimitiveCollection<McpServerPrompt>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, tools, prompts) in downstreams)
         {
             var collection = new McpServerPrimitiveCollection<McpServerTool>();
             foreach (var t in tools) collection.Add(t);
             harness.DownstreamTools[name] = collection;
+
+            if (prompts is not null)
+            {
+                var promptCollection = new McpServerPrimitiveCollection<McpServerPrompt>();
+                foreach (var p in prompts) promptCollection.Add(p);
+                harness.DownstreamPrompts[name] = promptCollection;
+            }
         }
 
         harness.Sentinel = McpServerTool.Create(Ping, new McpServerToolCreateOptions { Name = "aggregator_ping" });
+        harness.SentinelPrompt = McpServerPrompt.Create(Greeting, new McpServerPromptCreateOptions { Name = "aggregator_greeting" });
         harness.McpOptions = new McpServerOptions
         {
             ServerInfo = new Implementation { Name = "aggregator", Version = "test" },
-            ToolCollection = [harness.Sentinel]
+            ToolCollection = [harness.Sentinel],
+            PromptCollection = [harness.SentinelPrompt]
         };
 
         harness.Connections = new ConnectionManager(harness.Registry, options, NullLoggerFactory.Instance,
@@ -132,7 +179,8 @@ internal sealed class WrapperHarness : IAsyncDisposable
         var options = new McpServerOptions
         {
             ServerInfo = new Implementation { Name = serverName, Version = "1.0.0" },
-            ToolCollection = DownstreamTools[serverName]
+            ToolCollection = DownstreamTools[serverName],
+            PromptCollection = DownstreamPrompts.TryGetValue(serverName, out var prompts) ? prompts : null
         };
         var server = InMemoryMcpServer.Host(serverName, options);
         lock (_spawnLock) _spawned.Add(server);
@@ -141,6 +189,9 @@ internal sealed class WrapperHarness : IAsyncDisposable
 
     [SysDescription("Aggregator-side sentinel tool.")]
     private static string Ping() => "pong";
+
+    [SysDescription("Aggregator-side sentinel prompt.")]
+    private static string Greeting() => "hello";
 
     public async ValueTask DisposeAsync()
     {

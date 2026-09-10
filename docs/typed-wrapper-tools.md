@@ -114,8 +114,9 @@ collides silently.
 
 ### Q4 — Backwards compatibility
 
-`invoke_tool` and `get_prompt` remain, described as escape hatches. The REST invoke endpoint is
-unchanged and still uses the generic path. The self skill and the server instructions steer the
+`invoke_tool` and `get_prompt` remain, described as escape hatches (`get_prompt` now returns a
+`CallToolResult` so its failures are `isError` results rather than bare faults, and its input
+schema is unchanged). The REST invoke endpoint is unchanged and still uses the generic path. The self skill and the server instructions steer the
 model to `find_tools` and the typed tools first.
 
 ### Q5 — Wisp interaction
@@ -198,11 +199,39 @@ A wrapper name that matches one of the aggregator's own tools is never added.
 
 ### Q10 — Prompt bridging
 
-**Decision: proxy downstream prompts as real MCP prompts via `McpServerOptions.PromptCollection`**,
-in a follow-up issue. The aggregator is an MCP server, so it can preserve the tool/prompt
-distinction for hosts that surface prompts natively, and `prompts/list_changed` follows the same
-collection mechanism as tools. Bridging prompts as *tools* would work in every host but loses the
-distinction and doubles the tool count. `get_prompt` stays as the escape hatch meanwhile.
+**Decision: proxy downstream prompts as real MCP prompts via `McpServerOptions.PromptCollection`.**
+The aggregator is an MCP server, so it can preserve the tool/prompt distinction for hosts that
+surface prompts natively, and `prompts/list_changed` follows the same collection mechanism as
+tools. Bridging prompts as *tools* would work in every host but loses the distinction and doubles
+the tool count. `get_prompt` stays as the escape hatch.
+
+Shipped in [issue #40](https://github.com/MarimerLLC/mcp-aggregator/issues/40) as a mirror of the
+tool pipeline inside the same types, so session state, sync scheduling and DI wiring are shared:
+
+| Piece | Where | Role |
+|---|---|---|
+| `DownstreamPromptWrapper` | `Core/Tools` | `McpServerPrompt` subclass named `{server}__{prompt}`; carries `title`, `arguments`, `icons` unchanged, description prefixed `[server]`, `_meta.mcpAggregator = { serverId, serverName, promptName }`. Pre-flights `required` arguments; forwards through `ToolProxyHandler.GetPromptAsync`. |
+| `ToolProxyHandler.GetPromptAsync` | `Core/Tools` | The single `prompts/get` path for wrappers and `get_prompt`: `DefaultToolTimeout`, `ConnectionManager` retry, `mcp_prompt_gets_total` / `mcp_prompt_get_duration_seconds` with the `via` tag (`wrapper` or `get_prompt`), and an unknown-prompt hint naming the server's real prompts. |
+| `WrapperToolCatalog` (prompt side) | `Core/Services` | Builds prompt wrappers from `ToolIndex.GetPromptsForServerAsync` (reusing an instance when the argument fingerprint is unchanged), reconciles `PromptCollection` in Eager mode, keeps a per-session prompt activation set in Lazy mode and sends that session `prompts/list_changed`; `find_tools` scores prompts too and returns them under `prompts`. |
+| `ToolIndex.PromptsChanged` | `Core/Services` | Raised on `InvalidateCache` and on a TTL re-fetch whose prompt names, titles, descriptions or arguments differ; the catalog schedules a sync on it as it does on `ToolsChanged`. |
+| `PromptDetail.WrapperName` / `Protocol` | `Core/Models` | The proxied name (serialized, so `get_service_details` shows it) and the wire `Prompt` (not serialized). |
+| `AddAggregatorMcpServer` | `Core/Configuration` | Pre-assigns one shared `McpServerPrimitiveCollection<McpServerPrompt>` before `AddMcpServer()` (with the `PostConfigure` guard) — the same stateless-HTTP fix as for tools, and also what makes the SDK advertise `prompts.listChanged` — plus a `ListPromptsHandler` that appends the session's activated prompts and a `GetPromptHandler` fallback that resolves any proxied prompt by name. |
+
+Prompts have no `isError` result, so a missing required argument, an unknown name and an
+unreachable server all surface as JSON-RPC errors whose message is written for the caller
+(`McpErrorCode.InvalidParams` for the first two, `InternalError` for the last). `get_prompt` now
+routes through the same proxy and returns those messages as `isError` results, the way
+`invoke_tool` does.
+
+One consequence of honoring `WrapperMode` for prompts, flagged rather than solved: hosts show
+prompts to the *user*, and in Lazy mode a session's `prompts/list` is empty until the model calls
+`find_tools` or `get_service_details`. Prompts do not count toward Claude Desktop's tool cap, so a
+separate prompt mode (or always-Eager prompts) is a plausible follow-up if that turns out to matter.
+
+Covered by `DownstreamPromptWrapperTests`, `PromptListChangedEndToEndTests` (the prompt twin of
+`ListChangedEndToEndTests`, including the `subscriptions/listen { promptsListChanged }` path for
+2026-07-28 clients), the prompt half of `WrapperToolCatalogTests`, `ToolIndexTests` and
+`McpServerWiringTests`.
 
 ### Q11 — Skill documents
 
