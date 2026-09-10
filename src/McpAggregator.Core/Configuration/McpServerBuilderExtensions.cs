@@ -32,13 +32,17 @@ public static class McpServerBuilderExtensions
         // The same holds for PromptCollection (issue #40): a non-null collection is also what makes
         // the SDK advertise the prompts capability with listChanged, so it is pre-assigned even
         // though the aggregator has no attributed prompts of its own.
+        // And for ResourceCollection (issue #45): a non-null collection advertises resources with
+        // listChanged; subscribe stays unadvertised because it is never set in Capabilities.
         var sharedTools = new McpServerPrimitiveCollection<McpServerTool>();
         var sharedPrompts = new McpServerPrimitiveCollection<McpServerPrompt>();
+        var sharedResources = new McpServerResourceCollection();
         services.AddOptions<McpServerOptions>()
             .Configure(mcpOpts =>
             {
                 mcpOpts.ToolCollection = sharedTools;
                 mcpOpts.PromptCollection = sharedPrompts;
+                mcpOpts.ResourceCollection = sharedResources;
             });
 
         var builder = services.AddMcpServer();
@@ -96,6 +100,22 @@ public static class McpServerBuilderExtensions
                 }
                 mcpOpts.PromptCollection = sharedPrompts;
             }
+
+            if (!ReferenceEquals(mcpOpts.ResourceCollection, sharedResources))
+            {
+                if (mcpOpts.ResourceCollection is { } otherResources)
+                {
+                    foreach (var resource in otherResources)
+                        sharedResources.TryAdd(resource);
+                }
+                mcpOpts.ResourceCollection = sharedResources;
+            }
+
+            // WithSubscribeToResourcesHandler below advertises resources.subscribe on the author's
+            // behalf. The handler exists only to reject subscriptions with a readable message, so
+            // the capability must stay unadvertised (issue #45).
+            if (mcpOpts.Capabilities?.Resources is { } resourcesCapability)
+                resourcesCapability.Subscribe = null;
         });
         services.AddSingleton<WrapperToolCatalog>();
         services.AddHostedService<WrapperSyncHostedService>();
@@ -217,8 +237,91 @@ public static class McpServerBuilderExtensions
                 McpErrorCode.InvalidParams);
         });
 
+        // Bridged resources (issue #45), the same shape again: the SDK lists the shared
+        // ResourceCollection and appends this session's activated resources (plain ones in
+        // resources/list, templated ones in resources/templates/list); resources/read for a URI the
+        // collection does not hold resolves any bridged resource by URI and activates it.
+        builder.WithListResourcesHandler((request, ct) =>
+        {
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+            var resources = catalog?.ActivatedResourcesFor(request.Server) ?? [];
+            return ValueTask.FromResult(new ListResourcesResult
+            {
+                Resources = resources.Where(r => !r.IsTemplated).Select(r => r.ProtocolResource).OfType<Resource>().ToList()
+            });
+        });
+
+        builder.WithListResourceTemplatesHandler((request, ct) =>
+        {
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+            var resources = catalog?.ActivatedResourcesFor(request.Server) ?? [];
+            return ValueTask.FromResult(new ListResourceTemplatesResult
+            {
+                ResourceTemplates = resources.Where(r => r.IsTemplated).Select(r => r.ProtocolResourceTemplate).ToList()
+            });
+        });
+
+        builder.WithReadResourceHandler(async (request, ct) =>
+        {
+            var uri = request.Params?.Uri;
+            var catalog = request.Server?.Services?.GetService<WrapperToolCatalog>();
+
+            if (uri is { Length: > 0 } && catalog is not null)
+            {
+                DownstreamResourceWrapper? wrapper;
+                try
+                {
+                    wrapper = await catalog.ResolveResourceAsync(uri, ct);
+                }
+                catch (AggregatorException ex) when (!ct.IsCancellationRequested)
+                {
+                    // Registered and enabled, but unreachable. Resources have no error result, so
+                    // the readable message travels as the protocol error text.
+                    throw new McpProtocolException(ex.Message, McpErrorCode.InternalError);
+                }
+
+                if (wrapper is not null)
+                {
+                    await catalog.ActivateResourcesAsync(request.Server, [wrapper], ct);
+                    return await wrapper.ReadAsync(request, ct);
+                }
+            }
+
+            // The SDK's own default does the same split: -32002 for clients that negotiated a
+            // pre-2026-07-28 revision, InvalidParams for 2026-07-28 and later (its helper is internal).
+            var hint = catalog is not null
+                ? await catalog.BuildUnknownResourceHintAsync(uri, ct)
+                : $"Unknown resource URI: '{uri}'";
+            throw new McpProtocolException(hint, UnknownResourceErrorCode(request.Server?.NegotiatedProtocolVersion));
+        });
+
+        // Subscriptions are not bridged (the aggregator does not fan out resources/updated), and
+        // the capability is not advertised. A client that tries anyway gets a truthful answer
+        // instead of the SDK's silent no-op default.
+        builder.WithSubscribeToResourcesHandler((request, ct) =>
+            throw new McpProtocolException(
+                $"Resource subscriptions are not supported by this aggregator (requested '{request.Params?.Uri}'). " +
+                "Re-read the resource when you need fresh contents.",
+                McpErrorCode.InvalidRequest));
+
+        builder.WithUnsubscribeFromResourcesHandler((request, ct) =>
+            throw new McpProtocolException(
+                $"Resource subscriptions are not supported by this aggregator (requested '{request.Params?.Uri}'), so there is nothing to unsubscribe.",
+                McpErrorCode.InvalidRequest));
+
         return builder;
     }
+
+    /// <summary>
+    /// The 2026-07-28 revision replaced the resource-specific <c>-32002</c> with plain
+    /// <c>InvalidParams</c>; earlier clients still expect <c>ResourceNotFound</c>. Ordinal compare on
+    /// the ISO date string. A missing version (nothing negotiated yet) is treated as legacy.
+    /// </summary>
+    internal static McpErrorCode UnknownResourceErrorCode(string? negotiatedProtocolVersion)
+        => negotiatedProtocolVersion is { Length: > 0 } version
+           && string.CompareOrdinal(version, "2026-07-28") >= 0
+            ? McpErrorCode.InvalidParams
+            : McpErrorCode.ResourceNotFound;
 
     private static string? LoadSelfSkill(AggregatorOptions options)
     {
@@ -249,23 +352,28 @@ public static class McpServerBuilderExtensions
             Downstream tools are exposed as typed tools named "<server>__<tool>" (for example
             "microsoft-learn__microsoft_docs_search") that take the downstream tool's own parameters.
             Downstream prompt templates are exposed as MCP prompts named "<server>__<prompt>" with the
-            downstream prompt's own arguments.
+            downstream prompt's own arguments. Downstream resources are exposed as MCP resources with the
+            URI "mcp-aggregator://<server>/<downstream-uri>" (templates keep their <placeholder> expressions);
+            read_resource(serverName, uri) is the escape hatch when your client cannot read MCP resources.
 
             Workflow:
-              1. find_tools(query: "<what you need>") — search every downstream for matching tools and
-                 prompts. Results include each tool's exact name and input schema (and each prompt's
-                 name and arguments), and make them callable.
+              1. find_tools(query: "<what you need>") — search every downstream for matching tools,
+                 prompts and resources. Results include each tool's exact name and input schema (each
+                 prompt's name and arguments, each resource's URI), and make them callable.
               2. Call the "<server>__<tool>" tool directly with its listed parameters; request a
-                 "<server>__<prompt>" prompt through prompts/get with its listed arguments.
+                 "<server>__<prompt>" prompt through prompts/get with its listed arguments; read a
+                 resource through resources/read with its listed uri.
               3. list_services() / get_service_details(serverName) — browse servers and schemas instead
-                 of searching; get_service_details also makes that server's typed tools and prompts callable.
+                 of searching; get_service_details also makes that server's typed tools, prompts and
+                 resources callable.
               4. get_service_skill(serverName: "{selfName}") — full usage guide for this aggregator;
                  get_service_skill(serverName: "<downstream>") — usage guide for a specific service.
               5. invoke_tool(serverName, toolName, arguments) — use this when your client rejects a
                  "<server>__<tool>" name as not found (some clients do not refresh their tool index
                  mid-conversation even after tools/list_changed). Do not retry the typed name in that
                  conversation. arguments is a JSON object encoded as a string. get_prompt(serverName,
-                 promptName, arguments) is the same escape hatch for prompts.
+                 promptName, arguments) and read_resource(serverName, uri) are the same escape hatch
+                 for prompts and resources.
               6. show_admin_tools() — administrative tools (register/update/unregister servers, skills,
                  summaries, enable/disable) are hidden until you ask for them; they are also callable by name.
 

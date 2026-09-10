@@ -180,4 +180,93 @@ public class ToolIndexTests
 
         Assert.AreEqual(0, prompts.Count);
     }
+    // ---------------------------------------------------------------- resources (issue #45)
+
+    [SysDescription("The project readme.")]
+    private static string Readme() => "# Readme";
+
+    [SysDescription("The project readme, now with a title.")]
+    private static string ReadmeV2() => "# Readme v2";
+
+    [SysDescription("One documentation page by name.")]
+    private static string Doc([SysDescription("Page name")] string name) => "doc:" + name;
+
+    private static McpServerResource Resource(Delegate method, string uriTemplate, string name, string? title = null)
+        => McpServerResource.Create(method, new McpServerResourceCreateOptions { UriTemplate = uriTemplate, Name = name, Title = title });
+
+    [TestMethod]
+    public async Task GetResourcesForServer_PopulatesBothKinds_WithAggregatorUris()
+    {
+        await using var harness = await WrapperHarness.CreateWithResourcesAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [Tool(Echo, "echo")], null, [Resource(Readme, "file:///readme.md", "readme"), Resource(Doc, "file:///docs/{name}", "doc")]));
+
+        var resources = await harness.Index.GetResourcesForServerAsync("alpha", TestTimeout);
+
+        Assert.AreEqual(2, resources.Count);
+        var readme = resources.Single(r => !r.IsTemplate);
+        Assert.AreEqual("file:///readme.md", readme.DownstreamUri);
+        Assert.AreEqual("mcp-aggregator://alpha/file:///readme.md", readme.Uri);
+        Assert.AreEqual("readme", readme.Name);
+        Assert.IsNotNull(readme.Protocol, "The protocol Resource must be kept for the wrapper.");
+        Assert.IsNull(readme.ProtocolTemplate);
+
+        var doc = resources.Single(r => r.IsTemplate);
+        Assert.AreEqual("file:///docs/{name}", doc.DownstreamUri);
+        Assert.AreEqual("mcp-aggregator://alpha/file:///docs/{name}", doc.Uri);
+        Assert.IsNotNull(doc.ProtocolTemplate, "The protocol ResourceTemplate must be kept for the wrapper.");
+        Assert.IsNull(doc.Protocol);
+
+        var details = await harness.Index.GetDetailsAsync("alpha", TestTimeout);
+        Assert.AreEqual(2, details.Resources.Count, "get_service_details carries the resources.");
+    }
+
+    [TestMethod]
+    public async Task InvalidateCache_ForOneServer_RaisesResourcesChangedForIt()
+    {
+        await using var harness = await WrapperHarness.CreateWithResourcesAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [Tool(Echo, "echo")], null, [Resource(Readme, "file:///readme.md", "readme")]),
+            ("beta", [Tool(Echo, "echo")], null, [Resource(Readme, "file:///readme.md", "readme")]));
+        var raised = new List<string>();
+        harness.Index.ResourcesChanged += name => raised.Add(name);
+
+        harness.Index.InvalidateCache("alpha");
+
+        CollectionAssert.AreEqual(new[] { "alpha" }, raised);
+    }
+
+    [TestMethod]
+    public async Task Refetch_AfterTtlExpiry_RaisesResourcesChangedOnlyWhenTheResourceSetDiffers()
+    {
+        await using var harness = await WrapperHarness.CreateWithResourcesAsync(_dataDir, WrapperToolMode.Eager,
+            o => o.IndexCacheTtl = TimeSpan.Zero,
+            ("alpha", [Tool(Echo, "echo")], null, [Resource(Readme, "file:///readme.md", "readme")]));
+
+        await harness.Index.GetResourcesForServerAsync("alpha", TestTimeout);
+        var raised = new List<string>();
+        harness.Index.ResourcesChanged += name => raised.Add(name);
+
+        await harness.Index.GetResourcesForServerAsync("alpha", TestTimeout);
+        Assert.AreEqual(0, raised.Count, "An unchanged resource set must not raise.");
+
+        var downstream = harness.DownstreamResources["alpha"];
+        downstream.Remove(downstream["file:///readme.md"]);
+        downstream.Add(Resource(ReadmeV2, "file:///readme.md", "readme", title: "Readme"));
+
+        await harness.Index.GetResourcesForServerAsync("alpha", TestTimeout);
+
+        CollectionAssert.AreEqual(new[] { "alpha" }, raised);
+    }
+
+    [TestMethod]
+    public async Task ServerWithoutResourceSupport_IndexesZeroResources()
+    {
+        await using var harness = await WrapperHarness.CreateWithResourcesAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [Tool(Echo, "echo")], null, null));
+
+        var resources = await harness.Index.GetResourcesForServerAsync("alpha", TestTimeout);
+
+        Assert.AreEqual(0, resources.Count);
+        var details = await harness.Index.GetDetailsAsync("alpha", TestTimeout);
+        Assert.AreEqual(0, details.Resources.Count);
+    }
 }

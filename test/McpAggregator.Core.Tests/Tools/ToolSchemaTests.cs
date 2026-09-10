@@ -131,6 +131,16 @@ public class ToolSchemaTests
     }
 
     [TestMethod]
+    public void ReadResource_RequiresServerNameAndUri()
+    {
+        AssertRequired("read_resource", "serverName", "uri");
+
+        var (properties, _) = GetSchema("read_resource");
+        CollectionAssert.DoesNotContain(properties, "proxy");
+        CollectionAssert.DoesNotContain(properties, "registry");
+    }
+
+    [TestMethod]
     public void InjectedServicesAreNotExposedAsToolParameters()
     {
         // The DI-resolved services must stay out of the schema; if they leak in, every assertion

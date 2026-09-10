@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
+using McpAggregator.Core.Models;
 using McpAggregator.Core.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -24,6 +25,9 @@ public static class InvocationPath
 
     /// <summary>The generic <c>get_prompt</c> escape hatch.</summary>
     public const string GetPrompt = "get_prompt";
+
+    /// <summary>The generic <c>read_resource</c> escape hatch.</summary>
+    public const string ReadResource = "read_resource";
 }
 
 public class ToolProxyHandler
@@ -466,6 +470,141 @@ public class ToolProxyHandler
             AggregatorTelemetry.PromptGets.Add(1, tags);
             AggregatorTelemetry.PromptGetDuration.Record(sw.Elapsed.TotalSeconds,
                 new TagList { { "server_name", serverName }, { "prompt_name", promptName }, { "via", via } });
+        }
+    }
+
+    // ---------------------------------------------------------------- resources (issue #45)
+
+    /// <summary>
+    /// When a <c>resources/read</c> fails at the protocol level, checks whether the server declares
+    /// the URI at all (as a plain resource, or as an expansion of one of its templates). Returns a
+    /// corrective message naming the URIs and templates it does declare when it does not, or null
+    /// when the resource is known — so a genuine downstream fault keeps propagating.
+    /// </summary>
+    private async Task<string?> TryBuildUnknownResourceHintAsync(
+        string serverName,
+        string uri,
+        Exception cause,
+        CancellationToken ct)
+    {
+        try
+        {
+            var resources = await _toolIndex.GetResourcesForServerAsync(serverName, ct);
+
+            if (resources.Any(r => IsDeclared(r, uri)))
+                return null;
+
+            var available = resources.Count > 0
+                ? string.Join(", ", resources.Select(r => r.DownstreamUri).Order(StringComparer.Ordinal))
+                : "(none)";
+
+            // A common slip once bridged resources exist: passing the 'mcp-aggregator://{server}/…'
+            // URI as the downstream uri. Say so, and name the downstream URI it maps to.
+            var wrapperSlip = ResourceUriNaming.IsFor(uri, serverName, out var downstreamUri)
+                && resources.Any(r => IsDeclared(r, downstreamUri))
+                ? $"'{uri}' is the aggregator's URI for it; read it directly through resources/read, or pass uri: \"{downstreamUri}\" here. "
+                : string.Empty;
+
+            return $"Unknown resource '{uri}' on server '{serverName}'. {wrapperSlip}" +
+                   $"Available resources and templates: [{available}]. " +
+                   $"Re-invoke with one of those URIs (expanding any template), or call get_service_details(serverName: \"{serverName}\") " +
+                   $"for their descriptions. Underlying error: {cause.Message}";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to build unknown-resource hint for '{Uri}' on '{Server}'", uri, serverName);
+            return null;
+        }
+    }
+
+    private static bool IsDeclared(ResourceDetail resource, string uri)
+        => resource.IsTemplate
+            ? ResourceUriNaming.BuildTemplateMatcher(resource.DownstreamUri).IsMatch(uri)
+            : string.Equals(resource.DownstreamUri, uri, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The single downstream <c>resources/read</c> path, shared by the bridged
+    /// <c>mcp-aggregator://{server}/{uri}</c> resources and the <c>read_resource</c> escape hatch:
+    /// timeout, retry, telemetry and the unknown-resource hint live here. Failures the caller can
+    /// act on (unreachable server, timeout, unknown resource) surface as
+    /// <see cref="AggregatorException"/>; a genuine downstream fault on a known resource propagates
+    /// as the original <see cref="McpProtocolException"/>. Content URIs come back exactly as the
+    /// downstream reported them; callers rewrite them to aggregator form.
+    /// </summary>
+    /// <param name="uri">The downstream's own URI (never the aggregator form).</param>
+    /// <param name="via">
+    /// Which surface the request arrived through — one of the <see cref="InvocationPath"/> constants,
+    /// recorded as the <c>via</c> tag on the resource metric and activity.
+    /// </param>
+    public async Task<ReadResourceResult> ReadResourceAsync(
+        string serverName,
+        string uri,
+        string via,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation("Reading resource '{Uri}' on '{Server}' via {Via}", uri, serverName, via);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(_options.DefaultToolTimeout);
+
+        using var activity = AggregatorTelemetry.ActivitySource.StartActivity("mcp.resource_read");
+        activity?.SetTag("server_name", serverName);
+        activity?.SetTag("uri", uri);
+        activity?.SetTag("via", via);
+
+        var sw = Stopwatch.StartNew();
+        string resultLabel = "error";
+
+        try
+        {
+            var result = await _connectionManager.ExecuteWithRetryAsync<ReadResourceResult>(serverName,
+                async (client, token) => await client.ReadResourceAsync(uri, cancellationToken: token), cts.Token);
+
+            _logger.LogDebug("Resource '{Uri}' on '{Server}' returned {Count} content block(s)",
+                uri, serverName, result.Contents.Count);
+
+            resultLabel = "success";
+            return result;
+        }
+        catch (McpProtocolException ex) when (!ct.IsCancellationRequested)
+        {
+            var hint = await TryBuildUnknownResourceHintAsync(serverName, uri, ex, ct);
+            if (hint is null)
+                throw;
+
+            _logger.LogWarning("Unknown resource '{Uri}' requested on '{Server}': {Error}",
+                uri, serverName, ex.Message);
+            throw new AggregatorException(hint, ex);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            resultLabel = "cancelled";
+            throw;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            resultLabel = "timeout";
+            throw new AggregatorException($"Resource '{uri}' on '{serverName}' timed out after {_options.DefaultToolTimeout.TotalSeconds}s.");
+        }
+        finally
+        {
+            sw.Stop();
+
+            if (resultLabel == "success")
+                activity?.SetStatus(ActivityStatusCode.Ok);
+            else if (resultLabel is "error" or "timeout")
+                activity?.SetStatus(ActivityStatusCode.Error, resultLabel);
+
+            var tags = new TagList
+            {
+                { "server_name", serverName },
+                { "uri", uri },
+                { "result", resultLabel },
+                { "via", via }
+            };
+            AggregatorTelemetry.ResourceReads.Add(1, tags);
+            AggregatorTelemetry.ResourceReadDuration.Record(sw.Elapsed.TotalSeconds,
+                new TagList { { "server_name", serverName }, { "uri", uri }, { "via", via } });
         }
     }
 }

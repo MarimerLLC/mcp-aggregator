@@ -115,4 +115,48 @@ public class McpServerWiringTests
         Assert.AreSame(marker, seen);
         Assert.AreEqual(1, shared.Count, "Repeated per-request configuration must not duplicate prompts.");
     }
+
+    // ---------------------------------------------------------------- resources (issue #45)
+
+    [TestMethod]
+    public void EveryOptionsInstance_SharesOneResourceCollection()
+    {
+        using var provider = BuildProvider();
+
+        var singleton = provider.GetRequiredService<IOptions<McpServerOptions>>().Value;
+        var factory = provider.GetRequiredService<IOptionsFactory<McpServerOptions>>();
+        var perRequest1 = factory.Create(Options.DefaultName);
+        var perRequest2 = factory.Create(Options.DefaultName);
+
+        Assert.IsNotNull(singleton.ResourceCollection, "A non-null collection is what advertises the resources capability.");
+        Assert.AreSame(singleton.ResourceCollection, perRequest1.ResourceCollection);
+        Assert.AreSame(singleton.ResourceCollection, perRequest2.ResourceCollection);
+        Assert.AreEqual(0, singleton.ResourceCollection.Count, "The aggregator has no resources of its own.");
+        Assert.IsNull(singleton.Capabilities?.Resources?.Subscribe, "Subscriptions are not advertised.");
+    }
+
+    [TestMethod]
+    public void ResourceAddedToTheSharedCollection_IsVisibleToAFreshOptionsInstance()
+    {
+        using var provider = BuildProvider();
+
+        var shared = provider.GetRequiredService<IOptions<McpServerOptions>>().Value.ResourceCollection!;
+        var marker = McpServerResource.Create(() => "x", new McpServerResourceCreateOptions { UriTemplate = "mcp-aggregator://probe/file:///marker", Name = "marker" });
+        shared.Add(marker);
+
+        var perRequest = provider.GetRequiredService<IOptionsFactory<McpServerOptions>>().Create(Options.DefaultName);
+
+        Assert.IsTrue(perRequest.ResourceCollection!.TryGetPrimitive("mcp-aggregator://probe/file:///marker", out var seen));
+        Assert.AreSame(marker, seen);
+        Assert.AreEqual(1, shared.Count, "Repeated per-request configuration must not duplicate resources.");
+    }
+
+    [DataTestMethod]
+    [DataRow(null, ModelContextProtocol.McpErrorCode.ResourceNotFound)]
+    [DataRow("2024-11-05", ModelContextProtocol.McpErrorCode.ResourceNotFound)]
+    [DataRow("2025-06-18", ModelContextProtocol.McpErrorCode.ResourceNotFound)]
+    [DataRow("2026-07-28", ModelContextProtocol.McpErrorCode.InvalidParams)]
+    [DataRow("2027-01-01", ModelContextProtocol.McpErrorCode.InvalidParams)]
+    public void UnknownResourceErrorCode_FollowsTheNegotiatedRevision(string? version, ModelContextProtocol.McpErrorCode expected)
+        => Assert.AreEqual(expected, McpAggregator.Core.Configuration.McpServerBuilderExtensions.UnknownResourceErrorCode(version));
 }

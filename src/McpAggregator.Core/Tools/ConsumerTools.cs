@@ -12,7 +12,7 @@ namespace McpAggregator.Core.Tools;
 public class ConsumerTools
 {
     [McpServerTool(Name = "find_tools")]
-    [Description("Search every registered downstream MCP server for tools and prompt templates matching a query (name, description, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, plus matching prompts ('{server}__{prompt}') with their arguments, and makes them callable in your tool and prompt lists. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
+    [Description("Search every registered downstream MCP server for tools, prompt templates and resources matching a query (name, description, URI, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, matching prompts ('{server}__{prompt}') with their arguments, and matching resources with their 'mcp-aggregator://{server}/{uri}' URIs, and makes them callable in your tool, prompt and resource lists. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
     public static async Task<string> FindTools(
         WrapperToolCatalog catalog,
         McpServer server,
@@ -44,17 +44,32 @@ public class ConsumerTools
             activated = catalog.IsPromptActive(m.Wrapper.ProtocolPrompt.Name, server)
         }).ToList();
 
-        var hint = matches.Count == 0 && prompts.Count == 0
-            ? "No downstream tool or prompt matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
+        var resources = result.Resources.Select(m => new
+        {
+            uri = m.Wrapper.Uri,
+            server = m.Server.Name,
+            serverId = m.Server.Id,
+            downstreamUri = m.Wrapper.DownstreamUri,
+            name = m.Detail.Name,
+            title = m.Detail.Title,
+            description = m.Detail.Description,
+            mimeType = m.Detail.MimeType,
+            isTemplate = m.Detail.IsTemplate,
+            activated = catalog.IsResourceActive(m.Wrapper.Uri, server)
+        }).ToList();
+
+        var hint = matches.Count == 0 && prompts.Count == 0 && resources.Count == 0
+            ? "No downstream tool, prompt or resource matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
             : catalog.Mode == WrapperToolMode.Lazy
-                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name (prompts/list_changed was sent); get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback."
-                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name; get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback.";
+                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name (prompts/list_changed was sent); get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback. Resources are read through resources/read by their 'uri' (resources/list_changed was sent; expand a template's {placeholders} first); read_resource(serverName: server, uri: downstreamUri) is the fallback."
+                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name; get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback. Resources are read through resources/read by their 'uri' (expand a template's {placeholders} first); read_resource(serverName: server, uri: downstreamUri) is the fallback.";
 
         return JsonSerializer.Serialize(new
         {
             mode = catalog.Mode.ToString(),
             matches,
             prompts,
+            resources,
             skippedServers = result.SkippedServers,
             hint
         }, JsonOptions);
@@ -73,7 +88,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "get_service_details")]
-    [Description("Get full tool schemas (including input parameters) and prompt templates for a specific registered MCP server, and add that server's typed '{server}__{tool}' tools and '{server}__{prompt}' prompts to your tool and prompt lists.")]
+    [Description("Get full tool schemas (including input parameters), prompt templates and resources (with their 'mcp-aggregator://{server}/{uri}' URIs) for a specific registered MCP server, and add that server's typed '{server}__{tool}' tools, '{server}__{prompt}' prompts and resources to your tool, prompt and resource lists.")]
     public static async Task<string> GetServiceDetails(
         ToolIndex toolIndex,
         WrapperToolCatalog catalog,
@@ -210,8 +225,60 @@ public class ConsumerTools
         }
     }
 
+    [McpServerTool(Name = "read_resource")]
+    [Description("Escape hatch: read a resource from a downstream MCP server. Downstream resources are also exposed as MCP resources with the URI 'mcp-aggregator://{server}/{uri}' (see find_tools or get_service_details); read those through resources/read when your client supports resources, and use this tool when it does not. 'uri' is the downstream's own URI (a template must be expanded first); the aggregator form is accepted too. Returns the resource contents as embedded resource blocks.")]
+    public static async Task<CallToolResult> ReadResource(
+        ToolProxyHandler proxy,
+        ServerRegistry registry,
+        [Description("The name of the registered server (from list_services), e.g. 'docs'")] string serverName,
+        [Description("The resource URI as the downstream declares it (from get_service_details 'downstreamUri'), e.g. 'file:///readme.md'; the 'mcp-aggregator://{server}/{uri}' form is also accepted")] string uri,
+        CancellationToken ct = default)
+    {
+        if (string.Equals(serverName, registry.SelfName, StringComparison.OrdinalIgnoreCase))
+        {
+            return ErrorResult($"'{serverName}' is this aggregator, not a downstream server, and it has no resources of its own. " +
+                               "Downstream resources are listed by find_tools and get_service_details.");
+        }
+
+        if (string.IsNullOrWhiteSpace(uri))
+            return ErrorResult("'uri' is required: the downstream resource URI, or its 'mcp-aggregator://{server}/{uri}' form.");
+
+        // Accept the aggregator form as a convenience, but only for the named server: a URI that
+        // names a different server is a mistake worth naming rather than silently rerouting.
+        if (ResourceUriNaming.TryParse(uri, out var uriServer, out var downstreamUri))
+        {
+            if (!string.Equals(uriServer, serverName, StringComparison.OrdinalIgnoreCase))
+            {
+                return ErrorResult($"'{uri}' belongs to server '{uriServer}', not '{serverName}'. " +
+                                   $"Pass serverName: \"{uriServer}\" or the downstream URI of a resource on '{serverName}'.");
+            }
+            uri = downstreamUri;
+        }
+
+        try
+        {
+            var result = await proxy.ReadResourceAsync(serverName, uri, InvocationPath.ReadResource, ct);
+            ResourceUriNaming.RewriteContents(serverName, result);
+            return new CallToolResult
+            {
+                Content = result.Contents.Select(c => (ContentBlock)new EmbeddedResourceBlock { Resource = c }).ToList()
+            };
+        }
+        catch (ServerNotFoundException ex) when (!ct.IsCancellationRequested)
+        {
+            await registry.EnsureLoadedAsync(ct);
+            var registered = registry.GetAll().Where(s => s.Enabled).Select(s => s.Name).Order(StringComparer.OrdinalIgnoreCase);
+            return ErrorResult($"{ex.Message} Registered servers: [{string.Join(", ", registered)}]. " +
+                               "Re-invoke with one of those as serverName, or call find_tools to locate the resource.");
+        }
+        catch (AggregatorException ex) when (!ct.IsCancellationRequested)
+        {
+            return ErrorResult(ex.Message);
+        }
+    }
+
     [McpServerTool(Name = "refresh_service")]
-    [Description("Drop the cached connection, ServerInfo, tool list, and prompt list for a registered MCP server so the next call re-fetches them from the downstream, and rebuild its typed '{server}__{tool}' tools. Does NOT touch the skill document — that is admin-authored via update_skill. Use this after a downstream server has been upgraded or restarted.")]
+    [Description("Drop the cached connection, ServerInfo, tool list, prompt list and resource list for a registered MCP server so the next call re-fetches them from the downstream, and rebuild its typed '{server}__{tool}' tools, prompts and resources. Does NOT touch the skill document — that is admin-authored via update_skill. Use this after a downstream server has been upgraded or restarted.")]
     public static async Task<string> RefreshService(
         ToolIndex toolIndex,
         ConnectionManager connectionManager,
@@ -220,7 +287,7 @@ public class ConsumerTools
     {
         toolIndex.InvalidateCache(serverName);
         await connectionManager.DisconnectAsync(serverName);
-        return $"Cleared cached connection, ServerInfo, tools, and prompts for '{serverName}'. Skill document was not modified. Metadata will be reloaded on next use.";
+        return $"Cleared cached connection, ServerInfo, tools, prompts, and resources for '{serverName}'. Skill document was not modified. Metadata will be reloaded on next use.";
     }
 
     [McpServerTool(Name = "show_admin_tools")]

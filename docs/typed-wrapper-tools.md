@@ -80,7 +80,7 @@ The session key is `McpServer.SessionId` when the transport has one (stateful HT
 yields exactly "no memory between requests". (`request.Server` is a fresh
 `DestinationBoundMcpServer` facade per request in SDK 2.2.0 and cannot serve as a key.)
 
-The same disclosure applies to the aggregator's own surface. A Lazy session starts with eight
+The same disclosure applies to the aggregator's own surface. A Lazy session starts with nine
 consumer tools (about 5 KB of `tools/list`); the seven administrative tools are built by
 `AdminToolSet` outside the SDK's assembly scan, never enter the shared collection in Lazy mode,
 and join a session's list only through `show_admin_tools` or by being called by name. Eager mode
@@ -239,6 +239,64 @@ Covered by `DownstreamPromptWrapperTests`, `PromptListChangedEndToEndTests` (the
 show `invoke_tool(...)` examples still work; rewrite them to the typed form as they are touched.
 `SkillFingerprint` was left as is (tool and prompt names): a rename already changes the server
 entry, and a schema change is caught by the index fingerprint rather than the skill fingerprint.
+
+### Q12 — Resource bridging
+
+**Decision: bridge downstream resources and resource templates as real MCP resources via
+`McpServerOptions.ResourceCollection`**, under the URI `mcp-aggregator://{server}/{uri}`. After
+#39 and #40 resources were the one primitive the aggregator did not surface at all; a downstream
+that exposes documents, logs, schemas or templated lookups was invisible through it. Shipped in
+[issue #45](https://github.com/MarimerLLC/mcp-aggregator/issues/45) as the third mirror of the
+tool pipeline inside the same types.
+
+| Piece | Where | Role |
+|---|---|---|
+| `ResourceUriNaming` | `Core/Tools` | `mcp-aggregator://{server}/{uri}` rewrite and reverse (`TryParse` / `IsFor`), content-URI rewrite of a `ReadResourceResult`, and a best-effort RFC 6570 matcher (`BuildTemplateMatcher`) because the SDK's own `UriTemplate` is internal. |
+| `DownstreamResourceWrapper` | `Core/Tools` | `McpServerResource` subclass built from either a `Resource` or a `ResourceTemplate`. `ProtocolResourceTemplate.UriTemplate` is the rewritten URI (what the SDK keys the collection by); `ProtocolResource` is overridden to the full rewritten resource (keeps `size`) for plain resources and null for templates. Name, title, MIME type, annotations and icons carried through; description prefixed `[server]`; `_meta.mcpAggregator = { serverId, serverName, uri }`. `IsMatch` strips the prefix and compares ordinally or runs the matcher; `ReadAsync` strips the prefix, forwards through `ToolProxyHandler.ReadResourceAsync`, rewrites the content URIs back. |
+| `ToolProxyHandler.ReadResourceAsync` | `Core/Tools` | The single `resources/read` path for wrappers and `read_resource`: `DefaultToolTimeout`, `ConnectionManager` retry, `mcp_resource_reads_total` / `mcp_resource_read_duration_seconds` with the `via` tag (`wrapper` or `read_resource`), and an unknown-resource hint listing the server's URIs and templates (and naming the `mcp-aggregator://` slip when the caller passed the aggregator form as `uri`). |
+| `ToolIndex.GetResourcesForServerAsync` / `ResourcesChanged` | `Core/Services` | `resources/list` plus `resources/templates/list`, cached with a fingerprint over URI, name, title, description, MIME type and size. `MethodNotFound` on the list call means "no resources" (cached empty); on the templates call alone it means resources only. The event is raised on `InvalidateCache` and on a differing re-fetch. |
+| `WrapperToolCatalog` (resource side) | `Core/Services` | Builds resource wrappers (reusing an instance when URI and fingerprint are unchanged), reconciles `ResourceCollection` in Eager mode through the same generic `Reconcile`, keeps a per-session resource activation set in Lazy mode and sends `resources/list_changed`; `ResolveResourceAsync` matches an exact plain resource first, then the first template the URI expands; `find_tools` scores resources over the aggregator URI, name, title, description and MIME type and returns them under `resources`. |
+| `ResourceDetail` | `Core/Models` | `ServiceDetails.Resources`: `uri` (aggregator form), `downstreamUri`, `isTemplate`, name, title, description, MIME type, size; the wire objects are kept but not serialized. |
+| `AddAggregatorMcpServer` | `Core/Configuration` | Pre-assigns one shared `McpServerResourceCollection` before `AddMcpServer()` (the stateless-HTTP fix again; a non-null collection is also what advertises `resources.listChanged`), a `ListResourcesHandler` / `ListResourceTemplatesHandler` that append the session's activated plain resources and templates, a `ReadResourceHandler` fallback that resolves any bridged resource by URI, and explicit subscribe/unsubscribe handlers that reject with `InvalidRequest`. |
+| `read_resource` | `ConsumerTools` | Escape hatch taking the downstream URI or the aggregator form (checked against `serverName`); returns one `EmbeddedResourceBlock` per content with URIs in aggregator form; errors as `isError` results like `get_prompt`. |
+
+**URI scheme.** `mcp-aggregator://{server}/{original-uri}` with the original verbatim, no
+percent-encoding. `System.Uri` parses it with the server as host and the original as path, keeping
+query and fragment, so the SDK's collection comparer (which parses plain keys as `System.Uri`)
+round-trips it, and reversal is "strip the `mcp-aggregator://{server}/` prefix". Templates keep their
+`{…}` expressions untouched (`mcp-aggregator://probe/file:///docs/{path}`) and stay ordinal keys.
+The scheme is a fixed constant rather than `SelfName` because scheme characters exclude `_`. The
+verbatim form was chosen over percent-encoding for readability and because templates survive it
+unchanged; it is user-visible and durable — clients may store these URIs — so changing it later is
+a breaking change.
+
+**Subscriptions are not advertised.** The aggregator does not fan out `resources/updated`, so
+`resources.subscribe` stays unset (the SDK's `WithSubscribeToResourcesHandler` would advertise it,
+and the `PostConfigure` guard clears that) and the subscribe/unsubscribe handlers reject with
+`McpErrorCode.InvalidRequest` and a message, so a client that tries anyway gets a truthful answer
+instead of the SDK's silent no-op default.
+
+**Unknown-resource error code.** The SDK's default splits on the negotiated revision and its helper
+is internal, so the fallback handler does the same by ordinal date compare: `ResourceNotFound`
+(-32002) for clients before `2026-07-28`, `InvalidParams` from that revision on. The message is the
+catalog's hint (not aggregator form / unknown server / disabled / unreachable / no such resource
+with the server's real URIs and templates).
+
+**Fragment collisions.** The SDK collection compares plain URIs with `Uri ==`, which ignores the
+fragment and the host's case, so two downstream URIs that differ only by fragment collapse to one
+key. The catalog keeps the first and logs the second. Template matching is a best-effort RFC 6570
+approximation; the downstream is authoritative, and a false positive only picks a same-server
+wrapper, which forwards the URI identically.
+
+**Timeouts.** Reads share `DefaultToolTimeout`. A dedicated read timeout for large blobs is a
+follow-up, not solved here. The Lazy-mode caveat from Q10 applies to resources too: a host's
+attachment picker is empty until the model calls `find_tools` or `get_service_details`.
+
+Covered by `ResourceUriNamingTests`, `DownstreamResourceWrapperTests`,
+`ResourceListChangedEndToEndTests` (the resource twin of `ListChangedEndToEndTests`, including the
+`subscriptions/listen { resourcesListChanged }` path for 2026-07-28 clients, the error-code split,
+the subscribe rejection and the `read_resource` escape hatch), the resource third of
+`WrapperToolCatalogTests`, `ToolIndexTests`, `McpServerWiringTests` and `ToolSchemaTests`.
 
 ## Measurements
 

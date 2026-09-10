@@ -29,13 +29,25 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     /// install request filters or other server-side behavior.
     /// </param>
     public InMemoryMcpServer(string name, Action<McpServerOptions>? configureOptions, params McpServerTool[] tools)
-        : this(name, BuildOptions(name, configureOptions, tools, prompts: null), services: null)
+        : this(name, BuildOptions(name, configureOptions, tools, prompts: null, resources: null), services: null)
     {
     }
 
     /// <summary>A downstream that serves prompts as well as tools (issue #40).</summary>
     public InMemoryMcpServer(string name, IEnumerable<McpServerPrompt> prompts, params McpServerTool[] tools)
-        : this(name, BuildOptions(name, configureOptions: null, tools, prompts), services: null)
+        : this(name, BuildOptions(name, configureOptions: null, tools, prompts, resources: null), services: null)
+    {
+    }
+
+    /// <summary>A downstream that serves resources as well as tools (issue #45).</summary>
+    public InMemoryMcpServer(string name, IEnumerable<McpServerResource> resources, params McpServerTool[] tools)
+        : this(name, BuildOptions(name, configureOptions: null, tools, prompts: null, resources), services: null)
+    {
+    }
+
+    /// <summary>A downstream that serves prompts and resources as well as tools. A null set means "no support".</summary>
+    public InMemoryMcpServer(string name, IEnumerable<McpServerPrompt>? prompts, IEnumerable<McpServerResource>? resources, params McpServerTool[] tools)
+        : this(name, BuildOptions(name, configureOptions: null, tools, prompts, resources), services: null)
     {
     }
 
@@ -63,7 +75,12 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
     public static InMemoryMcpServer Host(string name, McpServerOptions options, IServiceProvider? services = null)
         => new(name, options, services);
 
-    private static McpServerOptions BuildOptions(string name, Action<McpServerOptions>? configureOptions, McpServerTool[] tools, IEnumerable<McpServerPrompt>? prompts)
+    private static McpServerOptions BuildOptions(
+        string name,
+        Action<McpServerOptions>? configureOptions,
+        McpServerTool[] tools,
+        IEnumerable<McpServerPrompt>? prompts,
+        IEnumerable<McpServerResource>? resources)
     {
         var toolCollection = new McpServerPrimitiveCollection<McpServerTool>();
         foreach (var tool in tools)
@@ -83,6 +100,15 @@ internal sealed class InMemoryMcpServer : IAsyncDisposable
             foreach (var prompt in prompts)
                 promptCollection.Add(prompt);
             options.PromptCollection = promptCollection;
+        }
+
+        if (resources is not null)
+        {
+            // Same rule for resources: only a non-null collection advertises the capability.
+            var resourceCollection = new McpServerResourceCollection();
+            foreach (var resource in resources)
+                resourceCollection.Add(resource);
+            options.ResourceCollection = resourceCollection;
         }
 
         configureOptions?.Invoke(options);

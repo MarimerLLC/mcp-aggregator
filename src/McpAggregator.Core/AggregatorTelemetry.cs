@@ -32,6 +32,18 @@ public static class AggregatorTelemetry
     public static readonly Histogram<double> PromptGetDuration =
         Meter.CreateHistogram<double>("mcp_prompt_get_duration_seconds", unit: "s", description: "Wall-clock duration of prompt fetches");
 
+    /// <summary>
+    /// Total resource reads; tags: server_name, uri (the downstream URI as requested), result
+    /// (success|error|timeout|cancelled), via (wrapper|read_resource — whether the read came through a
+    /// bridged MCP resource or the escape hatch).
+    /// </summary>
+    public static readonly Counter<long> ResourceReads =
+        Meter.CreateCounter<long>("mcp_resource_reads_total", description: "Total resource reads routed to downstream servers");
+
+    /// <summary>Resource read wall-clock duration; tags: server_name, uri, via</summary>
+    public static readonly Histogram<double> ResourceReadDuration =
+        Meter.CreateHistogram<double>("mcp_resource_read_duration_seconds", unit: "s", description: "Wall-clock duration of resource reads");
+
     /// <summary>Downstream server connection attempts; tags: server_name, result (connected|failed)</summary>
     public static readonly Counter<long> ConnectionAttempts =
         Meter.CreateCounter<long>("mcp_connection_attempts_total", description: "Total connection attempts to downstream MCP servers");
