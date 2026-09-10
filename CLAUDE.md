@@ -21,27 +21,41 @@ dotnet run --project src/McpAggregator.StdioServer     # Run stdio server
 2. **MCP tools are defined in Core** — both hosts discover them via `WithToolsFromAssembly(typeof(ConsumerTools).Assembly)`.
 3. **Registry persistence uses atomic writes** — temp file + rename to prevent corruption.
 4. **Connections are lazy** — downstream MCP servers are connected on first use, not at registration.
-5. **Only `WrapperToolCatalog` mutates `McpServerOptions.ToolCollection` and `PromptCollection` at runtime, and
-   it only ever adds or removes `DownstreamToolWrapper` / `DownstreamPromptWrapper` instances.** The
-   aggregator's own attributed tools are never touched.
+5. **Only `WrapperToolCatalog` mutates `McpServerOptions.ToolCollection`, `PromptCollection` and
+   `ResourceCollection` at runtime, and it only ever adds or removes `DownstreamToolWrapper` /
+   `DownstreamPromptWrapper` / `DownstreamResourceWrapper` instances.** The aggregator's own attributed
+   tools are never touched.
 
-## Typed wrapper tools (issue #39) and proxied prompts (issue #40)
+## Typed wrapper tools (issue #39), proxied prompts (issue #40) and bridged resources (issue #45)
 
 Every downstream tool is exposed as a `DownstreamToolWrapper` named `{server}__{tool}` carrying the
-downstream `inputSchema` unchanged, and every downstream prompt as a `DownstreamPromptWrapper`
-(`McpServerPrompt`) named `{server}__{prompt}` carrying the downstream `arguments` unchanged.
-`WrapperToolCatalog` (singleton, registered in `AddAggregatorMcpServer`) builds both from `ToolIndex`
-(`ToolDetail.Protocol` / `PromptDetail.Protocol` keep the wire objects). Everything below applies to
-prompts as it does to tools, with `PromptCollection`, `ToolIndex.PromptsChanged`,
-`prompts/list_changed`, a `ListPromptsHandler` and a `GetPromptHandler` fallback standing in for the
-tool equivalents; prompts have no `isError` result, so wrapper-side failures are
-`McpProtocolException`s with readable messages. `AggregatorOptions.WrapperMode`:
+downstream `inputSchema` unchanged, every downstream prompt as a `DownstreamPromptWrapper`
+(`McpServerPrompt`) named `{server}__{prompt}` carrying the downstream `arguments` unchanged, and
+every downstream resource or resource template as a `DownstreamResourceWrapper` (`McpServerResource`)
+at `mcp-aggregator://{server}/{uri}` (`ResourceUriNaming`: fixed scheme, server name as authority,
+downstream URI verbatim as path, templates keep their `{…}`) carrying the downstream metadata
+unchanged. `WrapperToolCatalog` (singleton, registered in `AddAggregatorMcpServer`) builds all three
+from `ToolIndex` (`ToolDetail.Protocol` / `PromptDetail.Protocol` / `ResourceDetail.Protocol` +
+`ProtocolTemplate` keep the wire objects). Everything below applies to prompts and resources as it
+does to tools, with `PromptCollection` / `ResourceCollection`, `ToolIndex.PromptsChanged` /
+`ResourcesChanged`, `prompts/list_changed` / `resources/list_changed`, a `ListPromptsHandler` /
+`ListResourcesHandler` + `ListResourceTemplatesHandler`, and a `GetPromptHandler` /
+`ReadResourceHandler` fallback standing in for the tool equivalents; prompts and resources have no
+`isError` result, so wrapper-side failures are `McpProtocolException`s with readable messages.
+Resource specifics: the SDK's `McpServerResourceCollection` keys plain URIs as `System.Uri`
+(fragment ignored, host case-insensitive; the catalog keeps the first of two colliding entries),
+`resources/read` tries an exact key then `IsMatch` on every entry then the fallback handler, the
+wrapper's template matcher is its own RFC 6570 approximation (the SDK's is internal), the unknown-URI
+error code is `ResourceNotFound` before protocol `2026-07-28` and `InvalidParams` from it on, and
+subscriptions are not bridged: `resources.subscribe` is kept unadvertised (the `PostConfigure` guard
+clears what `WithSubscribeToResourcesHandler` sets) and the subscribe/unsubscribe handlers reject with
+`InvalidRequest`. Design note: `docs/typed-wrapper-tools.md` Q12. `AggregatorOptions.WrapperMode`:
 
 - `Eager`: the catalog reconciles the shared `ToolCollection` on `ServerRegistry.RegistryChanged` and
   `ToolIndex.ToolsChanged`; `WrapperSyncHostedService` runs the first sync after host start and then every
   `IndexCacheTtl`. The SDK sends `list_changed` from the collection's `Changed` event.
 - `Lazy`: the shared collection is **never** touched. Activation is per session: `find_tools` /
-  `get_service_details` record wrappers (tools and prompts) for the calling session, `show_admin_tools`
+  `get_service_details` record wrappers (tools, prompts and resources) for the calling session, `show_admin_tools`
   records the admin tools, a `ListToolsHandler` appends that session's tools to `tools/list`, a
   `CallToolHandler` fallback dispatches any wrapper or admin tool by name (listed or not) and activates it
   for that session, and the catalog sends that session `list_changed` itself. `AdminTools` is deliberately
@@ -56,8 +70,10 @@ tool equivalents; prompts have no `isError` result, so wrapper-side failures are
 
 Both tool call paths go through `ToolProxyHandler.InvokeAsync(server, tool, args, via)`; the `via` metric tag
 is `wrapper` or `invoke_tool`. Both prompt paths go through `ToolProxyHandler.GetPromptAsync(server, prompt,
-args, via)` (`via` is `wrapper` or `get_prompt`). Design note and rockbot #420 answers:
-`docs/typed-wrapper-tools.md`.
+args, via)` (`via` is `wrapper` or `get_prompt`). Both resource paths go through
+`ToolProxyHandler.ReadResourceAsync(server, downstreamUri, via)` (`via` is `wrapper` or `read_resource`);
+callers rewrite the returned content URIs with `ResourceUriNaming.RewriteContents`. Design note and
+rockbot #420 answers: `docs/typed-wrapper-tools.md`.
 
 `McpServer` is not in DI. The handle the catalog uses is `IOptions<McpServerOptions>.Value.ToolCollection`;
 the SDK server reads it live per `tools/list` and (stateful transports only) subscribes to its `Changed`
@@ -69,12 +85,13 @@ legacy `initialize` clients get an `Mcp-Session-Id` session so `list_changed` an
 
 **Stateless HTTP builds a fresh `McpServerOptions` per request via `IOptionsFactory`**, and the SDK's
 options setup does `ToolCollection ??= []` before adding the attributed tools. `AddAggregatorMcpServer`
-therefore pre-assigns one shared `McpServerPrimitiveCollection<McpServerTool>` (and one
-`McpServerPrimitiveCollection<McpServerPrompt>`) in a `Configure` registered *before* `AddMcpServer()`, with
-a `PostConfigure` guard, so every options instance — the singleton and each per-request one — points at the
-same collections. Without that, the HTTP host lists only the attributed tools no matter what the catalog
-does. The pre-assigned (even empty) `PromptCollection` is also what makes the SDK advertise the prompts
-capability with `listChanged`. `McpServerWiringTests` pins both.
+therefore pre-assigns one shared `McpServerPrimitiveCollection<McpServerTool>` (plus one
+`McpServerPrimitiveCollection<McpServerPrompt>` and one `McpServerResourceCollection`) in a `Configure`
+registered *before* `AddMcpServer()`, with a `PostConfigure` guard, so every options instance — the singleton
+and each per-request one — points at the same collections. Without that, the HTTP host lists only the
+attributed tools no matter what the catalog does. The pre-assigned (even empty) `PromptCollection` /
+`ResourceCollection` is also what makes the SDK advertise the prompts / resources capability with
+`listChanged`. `McpServerWiringTests` pins all three.
 
 Server names are validated at registration (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`, no `__`, not the
 aggregator's own name) because they become wrapper-name prefixes. `RegisteredServer.Id` is immutable

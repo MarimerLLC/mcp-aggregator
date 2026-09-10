@@ -23,9 +23,11 @@ public class ToolIndex
 
     private readonly ConcurrentDictionary<string, CachedTools> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CachedPrompts> _promptCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, CachedResources> _resourceCache = new(StringComparer.OrdinalIgnoreCase);
 
     private record CachedTools(List<ToolDetail> Tools, DateTimeOffset FetchedAt, string Fingerprint);
     private record CachedPrompts(List<PromptDetail> Prompts, DateTimeOffset FetchedAt, string Fingerprint);
+    private record CachedResources(List<ResourceDetail> Resources, DateTimeOffset FetchedAt, string Fingerprint);
 
     /// <summary>
     /// Raised with a server name whenever that server's indexed tool set may have changed: an
@@ -42,6 +44,14 @@ public class ToolIndex
     /// prompts in step.
     /// </summary>
     public event Action<string>? PromptsChanged;
+
+    /// <summary>
+    /// The resource counterpart of <see cref="ToolsChanged"/>: raised when a server's indexed
+    /// resource or resource-template set may have changed (explicit invalidation, or a TTL re-fetch
+    /// that returned different URIs, names, titles, descriptions, MIME types or sizes).
+    /// <see cref="WrapperToolCatalog"/> listens to keep the bridged resources in step (issue #45).
+    /// </summary>
+    public event Action<string>? ResourcesChanged;
 
     public ToolIndex(
         ServerRegistry registry,
@@ -66,6 +76,8 @@ public class ToolIndex
             foreach (var key in stale) _cache.TryRemove(key, out _);
             var stalePrompts = _promptCache.Keys.Where(k => !registered.Contains(k)).ToList();
             foreach (var key in stalePrompts) _promptCache.TryRemove(key, out _);
+            var staleResources = _resourceCache.Keys.Where(k => !registered.Contains(k)).ToList();
+            foreach (var key in staleResources) _resourceCache.TryRemove(key, out _);
         };
     }
 
@@ -260,6 +272,16 @@ public class ToolIndex
             _logger.LogDebug(ex, "Server '{Server}' does not expose prompts", serverName);
         }
 
+        List<ResourceDetail> resources = [];
+        try
+        {
+            resources = await GetResourcesForServerAsync(serverName, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Server '{Server}' does not expose resources", serverName);
+        }
+
         return new ServiceDetails
         {
             Id = server.Id,
@@ -277,7 +299,8 @@ public class ToolIndex
             SkillRecordedVersion = server.SkillRecordedVersion,
             SkillRecordedAt = server.SkillRecordedAt,
             Tools = tools,
-            Prompts = prompts
+            Prompts = prompts,
+            Resources = resources
         };
     }
 
@@ -456,25 +479,150 @@ public class ToolIndex
         }
     }
 
+    // ---------------------------------------------------------------- resources (issue #45)
+
+    /// <summary>
+    /// The server's resources and resource templates, cached like tools and prompts. A server that
+    /// does not implement <c>resources/list</c> has no resources (an empty list is cached, not a
+    /// fault); one that lists resources but not templates yields resources only. Each entry carries
+    /// the wire object so <see cref="DownstreamResourceWrapper"/> can carry everything through.
+    /// </summary>
+    public async Task<List<ResourceDetail>> GetResourcesForServerAsync(string serverName, CancellationToken ct = default)
+    {
+        if (_resourceCache.TryGetValue(serverName, out var cached) &&
+            DateTimeOffset.UtcNow - cached.FetchedAt < _options.IndexCacheTtl)
+        {
+            return cached.Resources;
+        }
+
+        IList<McpClientResource> mcpResources;
+        try
+        {
+            mcpResources = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientResource>>(serverName,
+                async (client, token) => await client.ListResourcesAsync(cancellationToken: token), ct);
+        }
+        catch (McpProtocolException ex) when (ConnectionManager.IsUnsupportedCapability(ex))
+        {
+            _logger.LogDebug(ex, "Server '{Server}' does not support resources/list; indexing zero resources", serverName);
+            List<ResourceDetail> none = [];
+            StoreResources(serverName, none);
+            return none;
+        }
+
+        IList<McpClientResourceTemplate> mcpTemplates;
+        try
+        {
+            mcpTemplates = await _connectionManager.ExecuteWithRetryAsync<IList<McpClientResourceTemplate>>(serverName,
+                async (client, token) => await client.ListResourceTemplatesAsync(cancellationToken: token), ct);
+        }
+        catch (McpProtocolException ex) when (ConnectionManager.IsUnsupportedCapability(ex))
+        {
+            // resources/list worked, so the server has resource support; templates are simply
+            // something it does not do.
+            _logger.LogDebug(ex, "Server '{Server}' does not support resources/templates/list", serverName);
+            mcpTemplates = [];
+        }
+
+        var resources = mcpResources.Select(r => new ResourceDetail
+        {
+            Name = r.Name,
+            Title = r.Title,
+            Description = r.Description,
+            MimeType = r.MimeType,
+            Size = r.ProtocolResource.Size,
+            IsTemplate = false,
+            DownstreamUri = r.Uri,
+            Uri = ResourceUriNaming.For(serverName, r.Uri),
+            Protocol = r.ProtocolResource
+        }).Concat(mcpTemplates.Select(t => new ResourceDetail
+        {
+            Name = t.Name,
+            Title = t.Title,
+            Description = t.Description,
+            MimeType = t.MimeType,
+            IsTemplate = true,
+            DownstreamUri = t.UriTemplate,
+            Uri = ResourceUriNaming.For(serverName, t.UriTemplate),
+            ProtocolTemplate = t.ProtocolResourceTemplate
+        })).ToList();
+
+        StoreResources(serverName, resources);
+        _logger.LogDebug("Cached {Count} resource(s) for '{Server}'", resources.Count, serverName);
+        return resources;
+    }
+
+    private void StoreResources(string serverName, List<ResourceDetail> resources)
+    {
+        var fingerprint = ComputeResourceFingerprint(resources);
+        var replaced = _resourceCache.TryGetValue(serverName, out var previous)
+            && !string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal);
+
+        _resourceCache[serverName] = new CachedResources(resources, DateTimeOffset.UtcNow, fingerprint);
+
+        if (replaced)
+        {
+            _logger.LogInformation("Resource set for '{Server}' changed on refresh", serverName);
+            RaiseResourcesChanged(serverName);
+        }
+    }
+
+    /// <summary>
+    /// URI (or template), name, title, description, MIME type and size per resource, in URI order.
+    /// All of it is what a host shows the user, so all of it counts.
+    /// </summary>
+    private static string ComputeResourceFingerprint(IEnumerable<ResourceDetail> resources)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var r in resources.OrderBy(r => r.DownstreamUri, StringComparer.Ordinal))
+        {
+            sb.Append(r.IsTemplate ? 'T' : 'R').Append('');
+            sb.Append(r.DownstreamUri).Append('');
+            sb.Append(r.Name).Append('');
+            sb.Append(r.Title ?? string.Empty).Append('');
+            sb.Append(r.Description ?? string.Empty).Append('');
+            sb.Append(r.MimeType ?? string.Empty).Append('');
+            sb.Append(r.Size?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty).Append('');
+        }
+        return sb.ToString();
+    }
+
+    private void RaiseResourcesChanged(string serverName)
+    {
+        try
+        {
+            ResourcesChanged?.Invoke(serverName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "A ResourcesChanged handler failed for '{Server}'", serverName);
+        }
+    }
+
     public void InvalidateCache(string? serverName = null)
     {
         if (serverName is not null)
         {
             _cache.TryRemove(serverName, out _);
             _promptCache.TryRemove(serverName, out _);
+            _resourceCache.TryRemove(serverName, out _);
             RaiseToolsChanged(serverName);
             RaisePromptsChanged(serverName);
+            RaiseResourcesChanged(serverName);
         }
         else
         {
             var affected = _cache.Keys.ToList();
             var affectedPrompts = _promptCache.Keys.ToList();
+            var affectedResources = _resourceCache.Keys.ToList();
             _cache.Clear();
             _promptCache.Clear();
+            _resourceCache.Clear();
             foreach (var name in affected)
                 RaiseToolsChanged(name);
             foreach (var name in affectedPrompts)
                 RaisePromptsChanged(name);
+            foreach (var name in affectedResources)
+                RaiseResourcesChanged(name);
         }
     }
 }

@@ -2,7 +2,7 @@
 
 This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection. The aggregator exposes both an **MCP tool interface** and an equivalent **REST API** — use whichever fits your client.
 
-Every downstream tool is available as a **typed tool named `{server}__{tool}`** (for example `microsoft-learn__microsoft_docs_search`) that takes the downstream tool's own parameters. Use those when your client lets you call them; use `invoke_tool` when it does not (see *Client capability* below). Both reach the same downstream tool. Every downstream prompt template is likewise available as an **MCP prompt named `{server}__{prompt}`** with the downstream prompt's own arguments; `get_prompt` is the fallback for clients without prompt support.
+Every downstream tool is available as a **typed tool named `{server}__{tool}`** (for example `microsoft-learn__microsoft_docs_search`) that takes the downstream tool's own parameters. Use those when your client lets you call them; use `invoke_tool` when it does not (see *Client capability* below). Both reach the same downstream tool. Every downstream prompt template is likewise available as an **MCP prompt named `{server}__{prompt}`** with the downstream prompt's own arguments; `get_prompt` is the fallback for clients without prompt support. Every downstream resource is available as an **MCP resource at `mcp-aggregator://{server}/{uri}`** (the downstream's own URI after the server prefix); `read_resource` is the fallback for clients without resource support.
 
 ## When to Use the Aggregator
 
@@ -12,11 +12,11 @@ Every downstream tool is available as a **typed tool named `{server}__{tool}`** 
 
 ## Workflow
 
-1. **Find** — call `find_tools(query: "what you need")`. It searches every registered server and returns matching tools with their exact typed name (`tool`), owning server, description and full `inputSchema`, and matching prompt templates (`prompts`) with their exact name (`prompt`) and `arguments`. In `Lazy` mode this also adds those tools and prompts to your lists and the aggregator sends `tools/list_changed` / `prompts/list_changed`.
-2. **Call the typed tool** — call the returned `tool` name directly with the parameters from its `inputSchema`, e.g. `microsoft-learn__microsoft_docs_search(query: "dependency injection")`. Request a returned `prompt` name through `prompts/get` with its listed arguments.
-3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas and prompt templates (each with its `wrapperName`) and, in `Lazy` mode, makes that server's typed tools and prompts callable.
+1. **Find** — call `find_tools(query: "what you need")`. It searches every registered server and returns matching tools with their exact typed name (`tool`), owning server, description and full `inputSchema`, matching prompt templates (`prompts`) with their exact name (`prompt`) and `arguments`, and matching resources (`resources`) with their exact `uri`. In `Lazy` mode this also adds those tools, prompts and resources to your lists and the aggregator sends `tools/list_changed` / `prompts/list_changed` / `resources/list_changed`.
+2. **Call the typed tool** — call the returned `tool` name directly with the parameters from its `inputSchema`, e.g. `microsoft-learn__microsoft_docs_search(query: "dependency injection")`. Request a returned `prompt` name through `prompts/get` with its listed arguments. Read a returned resource `uri` through `resources/read`.
+3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas, prompt templates (each with its `wrapperName`) and resources (each with its `uri`) and, in `Lazy` mode, makes that server's typed tools, prompts and resources callable.
 4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
-5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt(serverName, promptName, arguments)` the same way for prompt templates when your client has no prompt support.
+5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt(serverName, promptName, arguments)` the same way for prompt templates when your client has no prompt support, and `read_resource(serverName, uri)` for resources when it has no resource support.
 6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
 7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
@@ -28,15 +28,17 @@ The same discovery data is available via the REST API. Start with `GET /api` to 
 
 | MCP Tool | REST Endpoint | Purpose |
 |----------|--------------|---------|
-| `find_tools` | — | Search every server for tools and prompts; returns typed names, schemas and prompt arguments, activates them in `Lazy` mode |
+| `find_tools` | — | Search every server for tools, prompts and resources; returns typed names, schemas, prompt arguments and resource URIs, activates them in `Lazy` mode |
 | `{server}__{tool}` | — | Typed wrapper for one downstream tool; takes that tool's own parameters |
 | `{server}__{prompt}` | — | MCP prompt for one downstream prompt template; takes that prompt's own arguments (via `prompts/get`, not a tool call) |
+| `mcp-aggregator://{server}/{uri}` | — | MCP resource for one downstream resource or resource template (via `resources/read`, not a tool call) |
 | `list_services` | `GET /api/services` | Index of all servers, their tools and each tool's `wrapperName` |
-| `get_service_details` | `GET /api/services/{name}` | Full tool schemas and prompt templates for a server; activates its typed tools and prompts in `Lazy` mode |
+| `get_service_details` | `GET /api/services/{name}` | Full tool schemas, prompt templates and resources for a server; activates its typed tools, prompts and resources in `Lazy` mode |
 | `get_service_skill` | `GET /api/services/{name}/skill` | Skill/usage guide for a server |
 | `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Escape hatch: proxy a tool call with a stringified JSON argument object |
 | `get_prompt` | — | Escape hatch: retrieve a rendered prompt template from a downstream server when your client has no prompt support (MCP only) |
-| `refresh_service` | — | Drop cached connection, tools and prompts for a server and rebuild its typed tools and prompts |
+| `read_resource` | — | Escape hatch: read a downstream resource by URI when your client has no resource support (MCP only) |
+| `refresh_service` | — | Drop cached connection, tools, prompts and resources for a server and rebuild its typed tools, prompts and resources |
 | `show_admin_tools` | — | Add the administrative tools to your tool list (hidden by default in `Lazy` mode) |
 | `enable_service` | `POST /api/admin/services/{name}/enable` | Enable a disabled server, allowing tool invocations |
 | `disable_service` | `POST /api/admin/services/{name}/disable` | Disable a server, preventing tool invocations |
@@ -108,6 +110,30 @@ get_prompt(
 
 It returns the same description and messages as JSON text.
 
+## Using Resources
+
+Some downstream servers expose resources — documents, logs, schemas, configuration, or templated lookups. Each one is exposed by the aggregator as a real MCP resource whose URI is `mcp-aggregator://{server}/{uri}`: the fixed `mcp-aggregator` scheme, the registered server name, then the downstream's own URI verbatim. A resource template keeps its `{placeholders}`: `file:///docs/{name}` on server `docs` is `mcp-aggregator://docs/file:///docs/{name}`, and you read one page as `mcp-aggregator://docs/file:///docs/intro.md`. Name, title, description, MIME type and size are the downstream's. `find_tools` returns matching resources under `resources` (each with `uri`, `downstreamUri`, `isTemplate` and `mimeType`), and `get_service_details` returns every resource of a server under `resources`.
+
+**Example:**
+```
+find_tools(query: "readme")
+  → resources: [{ uri: "mcp-aggregator://docs/file:///readme.md", server: "docs",
+                  downstreamUri: "file:///readme.md", name: "readme", mimeType: "text/markdown",
+                  isTemplate: false, activated: true }]
+
+resources/read(uri: "mcp-aggregator://docs/file:///readme.md")
+```
+
+The result is the downstream's contents (text or blob) with every content URI in `mcp-aggregator://` form. `WrapperMode` applies to resources as it does to tools: in `Lazy` mode a resource appears in **your** `resources/list` (templates in `resources/templates/list`) after `find_tools` / `get_service_details` (the aggregator sends `resources/list_changed`), and any existing aggregator URI is accepted by `resources/read` whether or not it is listed; in `Eager` mode every resource of every enabled server is always listed. Resource subscriptions are not supported: `resources/subscribe` is rejected with an error, so re-read a resource when you need fresh contents.
+
+**Fallback.** If your client has no resource support, call `read_resource` with the server name and the downstream URI (the aggregator form is accepted too):
+
+```
+read_resource(serverName: "docs", uri: "file:///readme.md")
+```
+
+It returns the contents as embedded resource blocks.
+
 ## Calling via REST API
 
 The same invocation is available as an HTTP request:
@@ -126,6 +152,7 @@ Content-Type: application/json
 - **Typed tool rejected by your client ("not found" before any aggregator response):** your client's tool index has not refreshed. Do not retry the typed name in this conversation; call `invoke_tool(serverName, toolName, arguments)` with the same arguments.
 - **Unknown typed tool (aggregator error result):** the aggregator accepts any existing `{server}__{tool}` name whether or not it is in your list, and lists it for your session afterwards. A name that does not exist returns an error result that says why: the server was renamed or removed (with the registered server names), the server is disabled, or the server has no such tool (with its actual tool names). Run `find_tools` again.
 - **Prompt errors:** prompts have no error result, so a missing required argument, an unknown `{server}__{prompt}` name, or an unreachable server comes back as a JSON-RPC error whose message names the argument, the server's real prompts, or the unavailable server. `get_prompt` returns the same messages as an error result.
+- **Resource errors:** likewise, an unknown `mcp-aggregator://{server}/{uri}` (no such server, disabled server, or a URI no resource or template on that server matches) or an unreachable server comes back as a JSON-RPC error whose message says which and lists the server's real resource URIs and templates. A URI that is not in aggregator form is rejected with the expected form. `read_resource` returns the same messages as an error result.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
 - **Slow first call:** Connections to downstream servers are lazy. The first call to a server may take longer as the connection is established. Subsequent calls will be faster.
 ## Tips

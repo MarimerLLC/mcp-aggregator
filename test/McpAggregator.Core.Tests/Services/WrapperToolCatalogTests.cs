@@ -516,4 +516,164 @@ public class WrapperToolCatalogTests
         Assert.IsNull(await harness.Catalog.ResolvePromptAsync("nosuchserver__summarize", TestTimeout));
         Assert.IsNull(await harness.Catalog.ResolvePromptAsync("noseparator", TestTimeout));
     }
+    // ---------------------------------------------------------------- resources (issue #45)
+
+    [SysDescription("The project readme.")]
+    private static string Readme() => "# Readme";
+
+    [SysDescription("The project readme, now HTML.")]
+    private static string ReadmeHtml() => "<h1>Readme</h1>";
+
+    [SysDescription("One documentation page by name.")]
+    private static string Doc([SysDescription("Page name")] string name) => "doc:" + name;
+
+    private static McpServerResource Resource(Delegate method, string uriTemplate, string name, string? mimeType = null)
+        => McpServerResource.Create(method, new McpServerResourceCreateOptions { UriTemplate = uriTemplate, Name = name, MimeType = mimeType });
+
+    private Task<WrapperHarness> ResourceServersAsync(WrapperToolMode mode)
+        => WrapperHarness.CreateWithResourcesAsync(_dataDir, mode,
+            ("docs", [Tool(SearchDocs, "search_docs")], null,
+                [Resource(Readme, "file:///readme.md", "readme", "text/markdown"), Resource(Doc, "file:///docs/{name}", "doc")]),
+            ("toolsonly", [Tool(Echo, "echo")], null, null));
+
+    [TestMethod]
+    public async Task Eager_Sync_PopulatesResourceCollection_AndLeavesTheSentinelAlone()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Eager);
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        CollectionAssert.AreEqual(
+            new[] { "mcp-aggregator://docs/file:///docs/{name}", "mcp-aggregator://docs/file:///readme.md" },
+            harness.ResourceWrapperUris);
+        Assert.IsTrue(harness.ResourceCollection.Contains(harness.SentinelResource), "Non-wrapper resources must be left alone.");
+        CollectionAssert.AreEqual(new[] { "docs__search_docs", "toolsonly__echo" }, harness.WrapperNames,
+            "A server without resource support still contributes its tools.");
+    }
+
+    [TestMethod]
+    public async Task Eager_Sync_RaisesExactlyOneChangedEventOnTheResourceCollection()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Eager);
+        var changed = 0;
+        harness.ResourceCollection.Changed += (_, _) => Interlocked.Increment(ref changed);
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+        Assert.AreEqual(1, changed, "Two adds must be batched into one Changed (one resources/list_changed).");
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+        Assert.AreEqual(1, changed, "A sync that changes nothing must not raise Changed.");
+    }
+
+    [TestMethod]
+    public async Task Eager_DisablingAServer_RemovesItsResources()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Eager);
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        await harness.Registry.SetEnabledAsync("docs", false);
+        await harness.Catalog.PendingSync;
+
+        Assert.AreEqual(0, harness.ResourceWrapperUris.Count);
+        Assert.IsTrue(harness.ResourceCollection.Contains(harness.SentinelResource));
+    }
+
+    [TestMethod]
+    public async Task Lazy_Sync_LeavesTheResourceCollectionUntouched()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Lazy);
+
+        await harness.Catalog.SyncAsync(TestTimeout);
+
+        Assert.AreEqual(0, harness.ResourceWrapperUris.Count);
+        Assert.AreEqual(1, harness.ResourceCollection.Count);
+    }
+
+    [TestMethod]
+    public async Task InvalidateCache_RebuildsTheResourceWrapperWhenItsMetadataChanged()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Eager);
+        await harness.Catalog.SyncAsync(TestTimeout);
+        var before = harness.Catalog.ActiveResourceWrappers.Single(w => w.DownstreamUri == "file:///readme.md");
+        var templateBefore = harness.Catalog.ActiveResourceWrappers.Single(w => w.IsTemplate);
+
+        var downstream = harness.DownstreamResources["docs"];
+        downstream.Remove(downstream["file:///readme.md"]);
+        downstream.Add(Resource(ReadmeHtml, "file:///readme.md", "readme", "text/html"));
+
+        harness.Index.InvalidateCache("docs");
+        await harness.Catalog.PendingSync;
+
+        var after = harness.Catalog.ActiveResourceWrappers.Single(w => w.DownstreamUri == "file:///readme.md");
+        Assert.AreNotSame(before, after);
+        Assert.AreNotEqual(before.Fingerprint, after.Fingerprint);
+        Assert.AreEqual("text/html", after.ProtocolResource!.MimeType);
+        Assert.AreSame(templateBefore, harness.Catalog.ActiveResourceWrappers.Single(w => w.IsTemplate),
+            "Unchanged resources keep their instance.");
+    }
+
+    [TestMethod]
+    public async Task FindAsync_ReturnsAndActivatesMatchingResources()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Lazy);
+        await using var session = harness.NewSession();
+
+        var result = await harness.Catalog.FindAsync("readme", 10, session.Server, TestTimeout);
+
+        Assert.AreEqual(0, result.Matches.Count, "No tool is called readme.");
+        Assert.AreEqual("mcp-aggregator://docs/file:///readme.md", result.Resources.Single().Wrapper.Uri);
+        CollectionAssert.AreEqual(new[] { "mcp-aggregator://docs/file:///readme.md" },
+            harness.Catalog.ActivatedResourcesFor(session.Server).Select(r => r.ProtocolResourceTemplate.UriTemplate).ToList());
+        Assert.IsTrue(harness.Catalog.IsResourceActive("mcp-aggregator://docs/file:///readme.md", session.Server));
+        Assert.AreEqual(0, harness.Catalog.ActivatedFor(session.Server).Count, "No tool was activated.");
+        Assert.AreEqual(0, harness.ResourceWrapperUris.Count, "The shared collection must stay untouched in Lazy mode.");
+    }
+
+    [TestMethod]
+    public async Task FindAsync_MatchesResourcesOnUriTokens_AndMimeType()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Eager);
+
+        var byUri = await harness.Catalog.FindAsync("docs name", 10, session: null, TestTimeout);
+        Assert.IsTrue(byUri.Resources.Any(r => r.Wrapper.IsTemplate), "URI tokens must score.");
+
+        var byMime = await harness.Catalog.FindAsync("markdown", 10, session: null, TestTimeout);
+        Assert.AreEqual("file:///readme.md", byMime.Resources.Single().Wrapper.DownstreamUri);
+    }
+
+    [TestMethod]
+    public async Task ResolveResourceAsync_MatchesExactUris_ThenTemplates_AndRejectsUnknownOnes()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Lazy);
+
+        var exact = await harness.Catalog.ResolveResourceAsync("mcp-aggregator://docs/file:///readme.md", TestTimeout);
+        Assert.IsNotNull(exact);
+        Assert.IsFalse(exact.IsTemplate);
+
+        var expanded = await harness.Catalog.ResolveResourceAsync("mcp-aggregator://docs/file:///docs/intro", TestTimeout);
+        Assert.IsNotNull(expanded);
+        Assert.IsTrue(expanded.IsTemplate);
+        Assert.AreEqual("file:///docs/{name}", expanded.DownstreamUri);
+
+        Assert.IsNull(await harness.Catalog.ResolveResourceAsync("mcp-aggregator://docs/file:///nope", TestTimeout));
+        Assert.IsNull(await harness.Catalog.ResolveResourceAsync("mcp-aggregator://ghost/file:///readme.md", TestTimeout));
+        Assert.IsNull(await harness.Catalog.ResolveResourceAsync("file:///readme.md", TestTimeout));
+        Assert.AreEqual(0, harness.ResourceWrapperUris.Count, "Resolving must not list anything.");
+    }
+
+    [TestMethod]
+    public async Task Lazy_ActivateServerAsync_ActivatesResourcesToo()
+    {
+        await using var harness = await ResourceServersAsync(WrapperToolMode.Lazy);
+        await using var session = harness.NewSession();
+
+        await harness.Catalog.ActivateServerAsync(session.Server, "docs", TestTimeout);
+
+        Assert.AreEqual(2, harness.Catalog.ActivatedResourcesFor(session.Server).Count);
+
+        await harness.Registry.SetEnabledAsync("docs", false);
+        await harness.Catalog.PendingSync;
+
+        Assert.AreEqual(0, harness.Catalog.ActivatedResourcesFor(session.Server).Count, "Disabling drops the session's resources.");
+    }
 }

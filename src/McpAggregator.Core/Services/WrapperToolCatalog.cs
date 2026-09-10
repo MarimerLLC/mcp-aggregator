@@ -16,14 +16,19 @@ public sealed record FindToolsMatch(DownstreamToolWrapper Wrapper, RegisteredSer
 /// <summary>One <c>find_tools</c> prompt hit.</summary>
 public sealed record FindPromptsMatch(DownstreamPromptWrapper Wrapper, RegisteredServer Server, PromptDetail Detail, int Score);
 
+/// <summary>One <c>find_tools</c> resource hit.</summary>
+public sealed record FindResourcesMatch(DownstreamResourceWrapper Wrapper, RegisteredServer Server, ResourceDetail Detail, int Score);
+
 /// <summary>Result of <see cref="WrapperToolCatalog.FindAsync"/>.</summary>
 /// <param name="Matches">Best tool matches first.</param>
 /// <param name="SkippedServers">Enabled servers whose tools could not be listed, with the reason.</param>
 /// <param name="Prompts">Best prompt matches first.</param>
+/// <param name="Resources">Best resource and resource-template matches first.</param>
 public sealed record FindToolsResult(
     IReadOnlyList<FindToolsMatch> Matches,
     IReadOnlyList<string> SkippedServers,
-    IReadOnlyList<FindPromptsMatch> Prompts);
+    IReadOnlyList<FindPromptsMatch> Prompts,
+    IReadOnlyList<FindResourcesMatch> Resources);
 
 /// <summary>
 /// Owns the typed wrapper tools (<c>{server}__{tool}</c>) and the proxied prompts
@@ -47,8 +52,10 @@ public sealed record FindToolsResult(
 /// </para>
 /// <para>
 /// Invariant: the catalog only ever adds or removes <see cref="DownstreamToolWrapper"/> /
-/// <see cref="DownstreamPromptWrapper"/> instances in the shared collections, and only in Eager
-/// mode. The aggregator's own attributed tools are never touched.
+/// <see cref="DownstreamPromptWrapper"/> / <see cref="DownstreamResourceWrapper"/> instances in
+/// the shared collections, and only in Eager mode. The aggregator's own attributed tools are never
+/// touched. Resources (issue #45) follow the prompt pipeline exactly, keyed by their
+/// <c>mcp-aggregator://{server}/{uri}</c> URI instead of a <c>{server}__{name}</c> name.
 /// </para>
 /// </summary>
 public sealed class WrapperToolCatalog
@@ -64,6 +71,7 @@ public sealed class WrapperToolCatalog
     // the index is the source of truth.
     private readonly ConcurrentDictionary<string, IReadOnlyList<DownstreamToolWrapper>> _built = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<DownstreamPromptWrapper>> _builtPrompts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<DownstreamResourceWrapper>> _builtResources = new(StringComparer.OrdinalIgnoreCase);
 
     // Lazy mode: wrappers activated per session. The SDK hands tools a fresh McpServer facade per
     // request, so the facade cannot be the key. What is stable: the session id where the transport
@@ -86,6 +94,7 @@ public sealed class WrapperToolCatalog
     {
         public ConcurrentDictionary<string, McpServerTool> Tools { get; } = new(StringComparer.Ordinal);
         public ConcurrentDictionary<string, McpServerPrompt> Prompts { get; } = new(StringComparer.Ordinal);
+        public ConcurrentDictionary<string, McpServerResource> Resources { get; } = new(StringComparer.Ordinal);
         public DateTimeOffset LastTouched { get; set; } = DateTimeOffset.UtcNow;
     }
 
@@ -157,6 +166,7 @@ public sealed class WrapperToolCatalog
         _registry.RegistryChanged += OnRegistryChanged;
         _toolIndex.ToolsChanged += OnToolsChanged;
         _toolIndex.PromptsChanged += OnPromptsChanged;
+        _toolIndex.ResourcesChanged += OnResourcesChanged;
     }
 
     public WrapperToolMode Mode => _options.WrapperMode;
@@ -168,6 +178,10 @@ public sealed class WrapperToolCatalog
     /// <summary>The proxied prompts currently in the shared, process-wide prompt list (Eager mode).</summary>
     public IReadOnlyList<DownstreamPromptWrapper> ActivePromptWrappers
         => PromptCollection.OfType<DownstreamPromptWrapper>().ToList();
+
+    /// <summary>The bridged resources currently in the shared, process-wide resource list (Eager mode).</summary>
+    public IReadOnlyList<DownstreamResourceWrapper> ActiveResourceWrappers
+        => ResourceCollection.OfType<DownstreamResourceWrapper>().ToList();
 
     /// <summary>The administrative tools (listed in Eager mode; disclosed per session in Lazy mode).</summary>
     public IReadOnlyList<McpServerTool> AdminTools => _adminTools.Tools;
@@ -211,6 +225,15 @@ public sealed class WrapperToolCatalog
         {
             var options = _mcpServerOptions.Value;
             return options.PromptCollection ??= [];
+        }
+    }
+
+    private McpServerResourceCollection ResourceCollection
+    {
+        get
+        {
+            var options = _mcpServerOptions.Value;
+            return options.ResourceCollection ??= new McpServerResourceCollection();
         }
     }
 
@@ -365,14 +388,106 @@ public sealed class WrapperToolCatalog
         return wrappers.FirstOrDefault(w => string.Equals(w.ProtocolPrompt.Name, wrapperName, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Builds (or reuses) the bridged resource set for one server from the index: one wrapper per
+    /// downstream resource and per resource template. A wrapper instance is reused when its URI
+    /// and fingerprint are unchanged so the resource collection is not churned by a refresh that
+    /// changed nothing. A server without resource support yields an empty list. Two downstream
+    /// URIs that differ only by fragment collide in the SDK collection (its comparer ignores
+    /// fragments); the first one wins and the second is logged.
+    /// </summary>
+    public async Task<IReadOnlyList<DownstreamResourceWrapper>> GetResourceWrappersAsync(string serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var server = _registry.Get(serverName);
+        var resources = await _toolIndex.GetResourcesForServerAsync(server.Name, ct);
+
+        var previous = _builtResources.TryGetValue(server.Name, out var existing)
+            ? existing.ToDictionary(w => w.Uri, StringComparer.Ordinal)
+            : new Dictionary<string, DownstreamResourceWrapper>(StringComparer.Ordinal);
+
+        var wrappers = new List<DownstreamResourceWrapper>(resources.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var seenKeys = new McpServerResourceCollection();
+
+        foreach (var resource in resources)
+        {
+            if (resource.Protocol is null && resource.ProtocolTemplate is null)
+                continue;
+
+            var uri = resource.Uri;
+            if (!seen.Add(uri))
+            {
+                _logger.LogWarning(
+                    "Two resources on '{Server}' map to the same URI '{Uri}'; keeping the first",
+                    server.Name, uri);
+                continue;
+            }
+
+            var fingerprint = resource.Protocol is { } plain
+                ? DownstreamResourceWrapper.ComputeFingerprint(plain)
+                : DownstreamResourceWrapper.ComputeFingerprint(resource.ProtocolTemplate!);
+
+            DownstreamResourceWrapper wrapper;
+            if (previous.TryGetValue(uri, out var reusable)
+                && string.Equals(reusable.Fingerprint, fingerprint, StringComparison.Ordinal)
+                && string.Equals(reusable.ServerId, server.Id, StringComparison.Ordinal))
+            {
+                wrapper = reusable;
+            }
+            else
+            {
+                wrapper = resource.Protocol is { } r
+                    ? new DownstreamResourceWrapper(server, r, _proxy, _logger)
+                    : new DownstreamResourceWrapper(server, resource.ProtocolTemplate!, _proxy, _logger);
+            }
+
+            // The SDK collection compares plain URIs as System.Uri (fragment ignored, host
+            // case-insensitive); a second wrapper it considers equal could never be added.
+            if (!seenKeys.TryAdd(wrapper))
+            {
+                _logger.LogWarning(
+                    "Resource '{Uri}' on '{Server}' is indistinguishable from an earlier one to the resource collection (fragment or case only); keeping the first",
+                    uri, server.Name);
+                continue;
+            }
+
+            wrappers.Add(wrapper);
+        }
+
+        _builtResources[server.Name] = wrappers;
+        return wrappers;
+    }
+
+    /// <summary>
+    /// Resolves a bridged resource by its aggregator URI against the live index, whether or not it
+    /// is listed anywhere: an exact match on a plain resource first, then the first template whose
+    /// pattern the URI expands. Null when the URI does not parse, the server is unknown or disabled,
+    /// or nothing on the server matches. Throws when the server is registered and enabled but
+    /// cannot be reached.
+    /// </summary>
+    public async Task<DownstreamResourceWrapper?> ResolveResourceAsync(string aggregatorUri, CancellationToken ct = default)
+    {
+        if (!ResourceUriNaming.TryParse(aggregatorUri, out var serverName, out _))
+            return null;
+
+        await _registry.EnsureLoadedAsync(ct);
+        if (!_registry.TryGet(serverName, out var server) || server is null || !server.Enabled)
+            return null;
+
+        var wrappers = await GetResourceWrappersAsync(server.Name, ct);
+        return wrappers.FirstOrDefault(w => !w.IsTemplate && w.IsMatch(aggregatorUri))
+            ?? wrappers.FirstOrDefault(w => w.IsTemplate && w.IsMatch(aggregatorUri));
+    }
+
     // ---------------------------------------------------------------- search
 
     /// <summary>
-    /// Searches every enabled server's tools and prompts for <paramref name="query"/>. An exact
-    /// name match ranks first, then token hits on the downstream name, wrapper name, description
-    /// and server metadata. <paramref name="limit"/> applies to tools and prompts separately. In
-    /// <see cref="WrapperToolMode.Lazy"/> mode the returned matches are activated for
-    /// <paramref name="session"/> before this returns.
+    /// Searches every enabled server's tools, prompts and resources for <paramref name="query"/>.
+    /// An exact name match ranks first, then token hits on the downstream name, wrapper name (or
+    /// aggregator URI), description and server metadata. <paramref name="limit"/> applies to each
+    /// kind separately. In <see cref="WrapperToolMode.Lazy"/> mode the returned matches are
+    /// activated for <paramref name="session"/> before this returns.
     /// </summary>
     public async Task<FindToolsResult> FindAsync(string query, int limit, McpServer? session, CancellationToken ct = default)
     {
@@ -381,10 +496,11 @@ public sealed class WrapperToolCatalog
         var normalizedQuery = Normalize(query);
         var tokens = Tokenize(query);
         if (tokens.Count == 0)
-            return new FindToolsResult([], [], []);
+            return new FindToolsResult([], [], [], []);
 
         var matches = new List<FindToolsMatch>();
         var promptMatches = new List<FindPromptsMatch>();
+        var resourceMatches = new List<FindResourcesMatch>();
         var skipped = new List<string>();
 
         foreach (var server in _registry.GetAll().Where(s => s.Enabled).OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
@@ -427,7 +543,8 @@ public sealed class WrapperToolCatalog
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogDebug(ex, "find_tools could not list prompts on '{Server}': {Message}", server.Name, ex.Message);
-                continue;
+                promptWrappers = [];
+                promptDetails = [];
             }
 
             var promptByName = promptDetails.ToDictionary(d => d.Name, StringComparer.Ordinal);
@@ -440,6 +557,34 @@ public sealed class WrapperToolCatalog
                 var score = Score(normalizedQuery, tokens, wrapper.ProtocolPrompt.Name, wrapper.PromptName, detail.Description, server);
                 if (score > 0)
                     promptMatches.Add(new FindPromptsMatch(wrapper, server, detail, score));
+            }
+
+            // Resources likewise (issue #45). The aggregator URI stands in for the wrapper name so
+            // URI tokens score; title and MIME type ride along with the description.
+            IReadOnlyList<DownstreamResourceWrapper> resourceWrappers;
+            List<ResourceDetail> resourceDetails;
+            try
+            {
+                resourceWrappers = await GetResourceWrappersAsync(server.Name, ct);
+                resourceDetails = await _toolIndex.GetResourcesForServerAsync(server.Name, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "find_tools could not list resources on '{Server}': {Message}", server.Name, ex.Message);
+                continue;
+            }
+
+            var resourceByUri = resourceDetails.ToDictionary(d => d.Uri, StringComparer.Ordinal);
+
+            foreach (var wrapper in resourceWrappers)
+            {
+                if (!resourceByUri.TryGetValue(wrapper.Uri, out var detail))
+                    continue;
+
+                var text = string.Join(' ', detail.Title ?? string.Empty, detail.Description ?? string.Empty, detail.MimeType ?? string.Empty);
+                var score = Score(normalizedQuery, tokens, wrapper.Uri, detail.Name, text, server);
+                if (score > 0)
+                    resourceMatches.Add(new FindResourcesMatch(wrapper, server, detail, score));
             }
         }
 
@@ -455,13 +600,22 @@ public sealed class WrapperToolCatalog
             .Take(Math.Max(1, limit))
             .ToList();
 
+        var topResources = resourceMatches
+            .OrderByDescending(m => m.Score)
+            .ThenBy(m => m.Wrapper.Uri, StringComparer.Ordinal)
+            .Take(Math.Max(1, limit))
+            .ToList();
+
         if (top.Count > 0)
             await ActivateAsync(session, top.Select(m => m.Wrapper), ct);
 
         if (topPrompts.Count > 0)
             await ActivatePromptsAsync(session, topPrompts.Select(m => m.Wrapper), ct);
 
-        return new FindToolsResult(top, skipped, topPrompts);
+        if (topResources.Count > 0)
+            await ActivateResourcesAsync(session, topResources.Select(m => m.Wrapper), ct);
+
+        return new FindToolsResult(top, skipped, topPrompts, topResources);
     }
 
     // ---------------------------------------------------------------- per-session activation (Lazy)
@@ -546,27 +700,73 @@ public sealed class WrapperToolCatalog
     }
 
     /// <summary>
-    /// Lazy mode: activates every wrapper tool and proxied prompt of one server for
-    /// <paramref name="session"/>. Prompts are best-effort: a server whose tools listed but whose
-    /// prompts cannot be fetched still gets its tools activated.
+    /// Lazy mode: makes the resources part of <paramref name="session"/>'s resource list and tells
+    /// that session the list changed. No-op in Eager mode and when there is no session to remember
+    /// it for. Keyed by aggregator URI (or URI template).
+    /// </summary>
+    public async Task ActivateResourcesAsync(McpServer? session, IEnumerable<McpServerResource> resources, CancellationToken ct = default)
+    {
+        if (Mode != WrapperToolMode.Lazy)
+            return;
+
+        var state = GetOrCreateSession(session);
+        if (state is null)
+            return;
+
+        var added = 0;
+        foreach (var resource in resources)
+        {
+            var key = resource.ProtocolResourceTemplate.UriTemplate;
+            if (state.Resources.TryAdd(key, resource))
+                added++;
+            else
+                state.Resources[key] = resource; // refreshed instance
+        }
+
+        if (added == 0)
+            return;
+
+        _logger.LogInformation("Activated {Count} resource(s) for a session ({Total} active in it)", added, state.Resources.Count);
+
+        try
+        {
+            await session!.SendNotificationAsync(NotificationMethods.ResourceListChangedNotification, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not send resources/list_changed to the session");
+        }
+    }
+
+    /// <summary>
+    /// Lazy mode: activates every wrapper tool, proxied prompt and bridged resource of one server
+    /// for <paramref name="session"/>. Prompts and resources are best-effort: a server whose tools
+    /// listed but whose prompts or resources cannot be fetched still gets the rest activated.
     /// </summary>
     public async Task ActivateServerAsync(McpServer? session, string serverName, CancellationToken ct = default)
     {
         var wrappers = await GetWrappersAsync(serverName, ct);
         await ActivateAsync(session, wrappers, ct);
 
-        IReadOnlyList<DownstreamPromptWrapper> prompts;
         try
         {
-            prompts = await GetPromptWrappersAsync(serverName, ct);
+            var prompts = await GetPromptWrappersAsync(serverName, ct);
+            await ActivatePromptsAsync(session, prompts, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "Could not list prompts on '{Server}' for activation: {Message}", serverName, ex.Message);
-            return;
         }
 
-        await ActivatePromptsAsync(session, prompts, ct);
+        try
+        {
+            var resources = await GetResourceWrappersAsync(serverName, ct);
+            await ActivateResourcesAsync(session, resources, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not list resources on '{Server}' for activation: {Message}", serverName, ex.Message);
+        }
     }
 
     /// <summary>Lazy mode: discloses the administrative tools to <paramref name="session"/>.</summary>
@@ -594,6 +794,70 @@ public sealed class WrapperToolCatalog
     public bool IsPromptActive(string promptName, McpServer? session)
         => PromptCollection.TryGetPrimitive(promptName, out _)
            || (TryGetSession(session) is { } state && state.Prompts.ContainsKey(promptName));
+
+    /// <summary>The resources activated for <paramref name="session"/> (Lazy mode); empty otherwise.</summary>
+    public IReadOnlyList<McpServerResource> ActivatedResourcesFor(McpServer? session)
+        => TryGetSession(session) is { } state
+            ? state.Resources.Values.OrderBy(r => r.ProtocolResourceTemplate.UriTemplate, StringComparer.Ordinal).ToList()
+            : [];
+
+    /// <summary>True when this aggregator URI (or template) is in <paramref name="session"/>'s resource list right now.</summary>
+    public bool IsResourceActive(string uri, McpServer? session)
+        => ResourceCollection.TryGetPrimitive(uri, out _)
+           || (TryGetSession(session) is { } state && state.Resources.ContainsKey(uri));
+
+    // ---------------------------------------------------------------- unknown-resource hint
+
+    /// <summary>
+    /// Explains a <c>resources/read</c> for a URI the aggregator could not dispatch. Distinguishes a
+    /// URI that is not in aggregator form, a server that was renamed or removed, a disabled server,
+    /// a URI nothing on a known server matches, and a server that exists but cannot be reached.
+    /// </summary>
+    public async Task<string> BuildUnknownResourceHintAsync(string? uri, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+
+        if (!ResourceUriNaming.TryParse(uri, out var serverName, out var downstreamUri))
+        {
+            return $"Unknown resource '{uri}'. Downstream resources are read as '{ResourceUriNaming.Prefix("{server}")}{{uri}}' " +
+                   "(the downstream's own URI after the server prefix). Call find_tools or get_service_details to list them, " +
+                   "or read_resource(serverName, uri) with the downstream URI.";
+        }
+
+        if (!_registry.TryGet(serverName, out var server) || server is null)
+        {
+            var registered = _registry.GetAll()
+                .Where(s => s.Enabled)
+                .Select(s => s.Name)
+                .Order(StringComparer.OrdinalIgnoreCase);
+            return $"Unknown resource '{uri}': no server named '{serverName}' is registered. " +
+                   "It may have been renamed or removed since your resource list was loaded. " +
+                   $"Registered servers: [{string.Join(", ", registered)}]. " +
+                   "Call find_tools to find the resource's current URI, then refresh your resource list.";
+        }
+
+        if (!server.Enabled)
+        {
+            return $"Resource '{uri}' is not available: server '{server.Name}' is disabled. " +
+                   $"Call enable_service(serverName: \"{server.Name}\") to re-enable it, then retry.";
+        }
+
+        IReadOnlyList<DownstreamResourceWrapper> wrappers;
+        try
+        {
+            wrappers = await GetResourceWrappersAsync(server.Name, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return $"Resource '{uri}' is not available: server '{server.Name}' is registered but could not be reached " +
+                   $"({ex.Message}). Retry later, or call refresh_service(serverName: \"{server.Name}\").";
+        }
+
+        var uris = wrappers.Select(w => w.Uri).Order(StringComparer.Ordinal);
+        return $"Unknown resource '{uri}': server '{server.Name}' has no resource '{downstreamUri}' and no template it expands. " +
+               $"Its resources and templates: [{string.Join(", ", uris)}]. " +
+               $"Call get_service_details(serverName: \"{server.Name}\") for their descriptions.";
+    }
 
     // ---------------------------------------------------------------- unknown-tool hint
 
@@ -690,6 +954,7 @@ public sealed class WrapperToolCatalog
 
             var desired = new Dictionary<string, DownstreamToolWrapper>(StringComparer.Ordinal);
             var desiredPrompts = new Dictionary<string, DownstreamPromptWrapper>(StringComparer.Ordinal);
+            var desiredResources = new Dictionary<string, DownstreamResourceWrapper>(StringComparer.Ordinal);
 
             if (Mode == WrapperToolMode.Eager)
             {
@@ -705,6 +970,7 @@ public sealed class WrapperToolCatalog
                         _logger.LogWarning(ex, "Skipping wrapper tools for '{Server}' (unavailable): {Message}", server.Name, ex.Message);
                         _built.TryRemove(server.Name, out _);
                         _builtPrompts.TryRemove(server.Name, out _);
+                        _builtResources.TryRemove(server.Name, out _);
                         continue;
                     }
 
@@ -727,7 +993,7 @@ public sealed class WrapperToolCatalog
                     {
                         _logger.LogWarning(ex, "Skipping prompts for '{Server}': {Message}", server.Name, ex.Message);
                         _builtPrompts.TryRemove(server.Name, out _);
-                        continue;
+                        promptWrappers = [];
                     }
 
                     foreach (var wrapper in promptWrappers)
@@ -738,6 +1004,24 @@ public sealed class WrapperToolCatalog
                                 "Prompt name '{Wrapper}' is claimed by more than one server; keeping the first",
                                 wrapper.ProtocolPrompt.Name);
                         }
+                    }
+
+                    IReadOnlyList<DownstreamResourceWrapper> resourceWrappers;
+                    try
+                    {
+                        resourceWrappers = await GetResourceWrappersAsync(server.Name, ct);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Skipping resources for '{Server}': {Message}", server.Name, ex.Message);
+                        _builtResources.TryRemove(server.Name, out _);
+                        continue;
+                    }
+
+                    foreach (var wrapper in resourceWrappers)
+                    {
+                        // Server-prefixed URIs cannot collide across servers; this guards the map only.
+                        desiredResources.TryAdd(wrapper.Uri, wrapper);
                     }
                 }
             }
@@ -756,6 +1040,14 @@ public sealed class WrapperToolCatalog
                 _logger.LogInformation(
                     "Proxied prompts synced ({Mode}): +{Added} -{Removed}, {Active} active",
                     Mode, promptsAdded, promptsRemoved, desiredPrompts.Count);
+            }
+
+            var (resourcesAdded, resourcesRemoved) = Reconcile(ResourceCollection, desiredResources, w => w.Uri, "resource");
+            if (resourcesAdded > 0 || resourcesRemoved > 0)
+            {
+                _logger.LogInformation(
+                    "Bridged resources synced ({Mode}): +{Added} -{Removed}, {Active} active",
+                    Mode, resourcesAdded, resourcesRemoved, desiredResources.Count);
             }
         }
         finally
@@ -822,6 +1114,9 @@ public sealed class WrapperToolCatalog
         foreach (var key in _builtPrompts.Keys.Where(k => !enabledNames.Contains(k)).ToList())
             _builtPrompts.TryRemove(key, out _);
 
+        foreach (var key in _builtResources.Keys.Where(k => !enabledNames.Contains(k)).ToList())
+            _builtResources.TryRemove(key, out _);
+
         foreach (var state in AllSessions())
         {
             foreach (var kvp in state.Tools.Where(kvp => kvp.Value is DownstreamToolWrapper w && !enabledNames.Contains(w.ServerName)).ToList())
@@ -829,6 +1124,9 @@ public sealed class WrapperToolCatalog
 
             foreach (var kvp in state.Prompts.Where(kvp => kvp.Value is DownstreamPromptWrapper w && !enabledNames.Contains(w.ServerName)).ToList())
                 state.Prompts.TryRemove(kvp.Key, out _);
+
+            foreach (var kvp in state.Resources.Where(kvp => kvp.Value is DownstreamResourceWrapper w && !enabledNames.Contains(w.ServerName)).ToList())
+                state.Resources.TryRemove(kvp.Key, out _);
         }
     }
 
@@ -859,6 +1157,9 @@ public sealed class WrapperToolCatalog
 
     private void OnPromptsChanged(string serverName)
         => ScheduleSync($"prompts changed for '{serverName}'");
+
+    private void OnResourcesChanged(string serverName)
+        => ScheduleSync($"resources changed for '{serverName}'");
 
     /// <summary>
     /// Fire-and-forget resync. Requests that arrive before the queued sync starts are coalesced;

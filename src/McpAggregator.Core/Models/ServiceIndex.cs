@@ -65,6 +65,7 @@ public class ServiceDetails
 
     public List<ToolDetail> Tools { get; set; } = [];
     public List<PromptDetail> Prompts { get; set; } = [];
+    public List<ResourceDetail> Resources { get; set; } = [];
 }
 
 public class ToolDetail
@@ -115,4 +116,35 @@ public class PromptArgumentDetail
     public required string Name { get; set; }
     public string? Description { get; set; }
     public bool Required { get; set; }
+}
+
+/// <summary>One downstream resource or resource template as the aggregator exposes it (issue #45).</summary>
+public class ResourceDetail
+{
+    public required string Name { get; set; }
+    public string? Title { get; set; }
+    public string? Description { get; set; }
+    public string? MimeType { get; set; }
+    public long? Size { get; set; }
+
+    /// <summary>True for a resource template (<see cref="DownstreamUri"/> carries <c>{…}</c> expressions).</summary>
+    public bool IsTemplate { get; set; }
+
+    /// <summary>The downstream's own URI (or URI template), exactly as it declared it.</summary>
+    public required string DownstreamUri { get; set; }
+
+    /// <summary>
+    /// The URI (or URI template) under which the aggregator exposes this resource:
+    /// <c>mcp-aggregator://{server}/{downstreamUri}</c>. Read through <c>resources/read</c> once it
+    /// appears in the client's resource list, or at any time by URI.
+    /// </summary>
+    public required string Uri { get; set; }
+
+    /// <summary>The downstream resource exactly as it came over the wire; null for templates. Not serialized.</summary>
+    [JsonIgnore]
+    public Resource? Protocol { get; set; }
+
+    /// <summary>The downstream resource template exactly as it came over the wire; null for plain resources. Not serialized.</summary>
+    [JsonIgnore]
+    public ResourceTemplate? ProtocolTemplate { get; set; }
 }

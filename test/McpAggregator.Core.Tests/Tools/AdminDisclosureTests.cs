@@ -151,8 +151,8 @@ public class AdminDisclosureTests
         var names = await ToolNamesAsync(rig.Client);
 
         Assert.IsFalse(names.Overlaps(AdminTools.ToolNames), $"Admin tools leaked into the initial list: {string.Join(", ", names.Intersect(AdminTools.ToolNames))}");
-        Assert.IsTrue(names.IsSupersetOf(["find_tools", "list_services", "get_service_details", "get_service_skill", "invoke_tool", "get_prompt", "refresh_service", "show_admin_tools"]));
-        Assert.AreEqual(8, names.Count, $"Initial surface: {string.Join(", ", names.Order())}");
+        Assert.IsTrue(names.IsSupersetOf(["find_tools", "list_services", "get_service_details", "get_service_skill", "invoke_tool", "get_prompt", "read_resource", "refresh_service", "show_admin_tools"]));
+        Assert.AreEqual(9, names.Count, $"Initial surface: {string.Join(", ", names.Order())}");
     }
 
     [TestMethod]

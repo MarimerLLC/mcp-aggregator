@@ -11,6 +11,7 @@ MCP Aggregator solves this by acting as a single gateway:
 - **One connection, many servers** — your AI tool connects to the aggregator; the aggregator manages connections to all downstream MCP servers.
 - **Typed wrapper tools** — every downstream tool is exposed as a first-class tool named `{server}__{tool}` with the downstream's own input schema, so models call `microsoft-learn__microsoft_docs_search(query: "...")` instead of authoring a stringified JSON blob. `find_tools` searches across every server.
 - **Proxied prompts** — every downstream prompt template is exposed as a real MCP prompt named `{server}__{prompt}` with the downstream's own arguments, so hosts that surface prompts natively show them in their prompt picker.
+- **Bridged resources** — every downstream resource and resource template is exposed as a real MCP resource at `mcp-aggregator://{server}/{uri}`, with the downstream's own metadata, so hosts that surface resources natively show them in their attachment picker.
 - **Lazy loading** — downstream servers are connected on first use, not at startup. Idle connections are automatically cleaned up.
 - **Dynamic registration** — add or remove MCP servers at runtime without restarting. Changes are persisted to disk.
 - **Skill documents** — attach optional markdown guides to each server describing when and how to use its tools, giving LLMs better context.
@@ -150,9 +151,9 @@ a process environment variable with `${VAR}` syntax, so the registry file stays 
 ```
 
 1. An AI tool connects to the aggregator via MCP (stdio or HTTP/SSE).
-2. It calls `find_tools` with what it needs ("send email", "docs search") and gets back matching typed tools with their exact names and input schemas, plus matching prompt templates with their arguments. Or it browses: `list_services` for a concise index, `get_service_details` for a server's full schemas and prompt templates.
-3. It calls the typed tool directly, e.g. `microsoft-learn__microsoft_docs_search(query: "...")`. The call is proxied to the downstream server with timeout, retry and error hints handled by the aggregator. Prompt templates are requested the same way, through `prompts/get` on the `{server}__{prompt}` name.
-4. `invoke_tool` and `get_prompt` remain as escape hatches for the generic path.
+2. It calls `find_tools` with what it needs ("send email", "docs search") and gets back matching typed tools with their exact names and input schemas, plus matching prompt templates with their arguments and matching resources with their URIs. Or it browses: `list_services` for a concise index, `get_service_details` for a server's full schemas, prompt templates and resources.
+3. It calls the typed tool directly, e.g. `microsoft-learn__microsoft_docs_search(query: "...")`. The call is proxied to the downstream server with timeout, retry and error hints handled by the aggregator. Prompt templates are requested the same way, through `prompts/get` on the `{server}__{prompt}` name, and resources through `resources/read` on the `mcp-aggregator://{server}/{uri}` URI.
+4. `invoke_tool`, `get_prompt` and `read_resource` remain as escape hatches for the generic path.
 5. Idle downstream connections are automatically closed after a configurable timeout.
 
 ### Typed wrapper tools
@@ -172,17 +173,28 @@ same proxy, and a request missing a required argument fails naming it without co
 downstream. Prompts have no `isError` result, so those failures are JSON-RPC errors with a readable
 message.
 
-`WrapperMode` controls when wrappers appear in `tools/list` and proxied prompts in `prompts/list`:
+Downstream resources are bridged the same way: each resource (and each resource template) becomes
+an MCP resource on the aggregator at `mcp-aggregator://{server}/{uri}` — the fixed scheme, the
+registered server name as the authority, and the downstream's own URI verbatim as the path, so
+`file:///docs/readme.md` on server `probe` is `mcp-aggregator://probe/file:///docs/readme.md` and
+the template `file:///docs/{path}` is `mcp-aggregator://probe/file:///docs/{path}`. Name, title,
+description, MIME type, size, annotations and icons are carried through unchanged. `resources/read`
+on an aggregator URI strips the prefix, forwards the read through the same proxy, and rewrites the
+content URIs back to aggregator form. Resource subscriptions are not bridged and not advertised; a
+`resources/subscribe` request is rejected with a readable error rather than silently accepted.
 
-| Mode | `tools/list` / `prompts/list` contain | Wrappers become callable when |
-|------|---------------------------------------|-------------------------------|
-| `Lazy` (default) | The consumer tools (8), plus whatever **this session** has activated; no prompts until activated | `find_tools` or `get_service_details` activates wrappers and prompts for the calling session, `show_admin_tools` activates the administrative tools, and the aggregator sends that session `notifications/tools/list_changed` / `notifications/prompts/list_changed`; every tool and prompt is also callable by name whether or not it is listed |
-| `Eager` | Every aggregator tool, every tool and every prompt of every enabled server | Always |
+`WrapperMode` controls when wrappers appear in `tools/list`, proxied prompts in `prompts/list`, and
+bridged resources in `resources/list` / `resources/templates/list`:
+
+| Mode | `tools/list` / `prompts/list` / `resources/list` contain | Wrappers become callable when |
+|------|----------------------------------------------------------|-------------------------------|
+| `Lazy` (default) | The consumer tools (9), plus whatever **this session** has activated; no prompts or resources until activated | `find_tools` or `get_service_details` activates wrappers, prompts and resources for the calling session, `show_admin_tools` activates the administrative tools, and the aggregator sends that session `notifications/tools/list_changed` / `notifications/prompts/list_changed` / `notifications/resources/list_changed`; every tool, prompt and resource is also callable by name (or URI) whether or not it is listed |
+| `Eager` | Every aggregator tool, every tool, prompt and resource of every enabled server | Always |
 
 Lazy activation is **per session** and is the aggregator's progressive disclosure. A session
-starts with eight consumer tools (`find_tools`, `list_services`, `get_service_details`,
-`get_service_skill`, `invoke_tool`, `get_prompt`, `refresh_service`, `show_admin_tools`), about
-5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
+starts with nine consumer tools (`find_tools`, `list_services`, `get_service_details`,
+`get_service_skill`, `invoke_tool`, `get_prompt`, `read_resource`, `refresh_service`,
+`show_admin_tools`), about 5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
 drills into a server; the seven administrative tools (`register_server`, `update_server`,
 `unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`)
 join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
@@ -221,16 +233,18 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 
 | Tool | Description |
 |------|-------------|
-| `find_tools` | Search every registered server for tools and prompts matching a query; returns typed tool names and schemas (and prompt names and arguments), and activates them for this session in `Lazy` mode |
+| `find_tools` | Search every registered server for tools, prompts and resources matching a query; returns typed tool names and schemas (prompt names and arguments, resource URIs), and activates them for this session in `Lazy` mode |
 | `{server}__{tool}` | One typed wrapper per downstream tool, carrying the downstream input schema |
 | `{server}__{prompt}` | One MCP prompt per downstream prompt template, carrying the downstream arguments (`prompts/list` / `prompts/get`, not a tool) |
+| `mcp-aggregator://{server}/{uri}` | One MCP resource per downstream resource or template, carrying the downstream metadata (`resources/list`, `resources/templates/list`, `resources/read`, not a tool) |
 | `show_admin_tools` | Add the administrative tools below to this session's tool list (`Lazy` mode hides them by default) |
 | `list_services` | Concise index of all registered servers with tool names, wrapper names and descriptions |
-| `get_service_details` | Full tool schemas and prompt templates for a specific server; activates its wrappers and prompts in `Lazy` mode |
+| `get_service_details` | Full tool schemas, prompt templates and resources for a specific server; activates its wrappers, prompts and resources in `Lazy` mode |
 | `get_service_skill` | Retrieve a server's skill document (markdown guide) |
 | `invoke_tool` | Escape hatch: proxy a tool call to a downstream server with a stringified JSON argument object |
 | `get_prompt` | Escape hatch: retrieve a rendered prompt template from a downstream server when the client cannot use MCP prompts |
-| `refresh_service` | Drop cached connection, tool and prompt lists for a server and rebuild its wrappers and prompts |
+| `read_resource` | Escape hatch: read a downstream resource by its URI (downstream or aggregator form) when the client cannot use MCP resources |
+| `refresh_service` | Drop cached connection, tool, prompt and resource lists for a server and rebuild its wrappers, prompts and resources |
 | `enable_service` | Admin: enable a registered server (its wrappers reappear) |
 | `disable_service` | Admin: disable a registered server (its wrappers are removed) |
 | `register_server` | Admin: register a new downstream MCP server |
@@ -290,7 +304,7 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
 | `Http:SessionMode` | `StatefulForInitializeClients` | HTTP host only: `Stateless`, `Stateful`, or sessions only for clients that use the legacy `initialize` handshake |
-| `WrapperMode` | `Lazy` | When typed `{server}__{tool}` wrappers appear in `tools/list` and `{server}__{prompt}` prompts in `prompts/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
+| `WrapperMode` | `Lazy` | When typed `{server}__{tool}` wrappers appear in `tools/list`, `{server}__{prompt}` prompts in `prompts/list` and `mcp-aggregator://{server}/{uri}` resources in `resources/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
 | `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
 | `SelfDescription` | *(built-in)* | Description shown for the aggregator in the service index |
 
