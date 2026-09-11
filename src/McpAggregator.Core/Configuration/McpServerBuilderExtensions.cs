@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Tools;
@@ -13,11 +14,6 @@ namespace McpAggregator.Core.Configuration;
 
 public static class McpServerBuilderExtensions
 {
-    // Cap on how much of the self skill document we embed in the MCP initialize-handshake
-    // instructions payload. Larger skills are still available through get_service_skill,
-    // but smaller payloads keep the handshake cheap for every client.
-    private const int MaxEmbeddedSkillChars = 16 * 1024;
-
     public static IMcpServerBuilder AddAggregatorMcpServer(this IServiceCollection services)
     {
         var version = GetAggregatorVersion();
@@ -47,8 +43,12 @@ public static class McpServerBuilderExtensions
 
         var builder = services.AddMcpServer();
 
+        // ServerInstructions is the short hand-written orientation (issue #44); the self skill
+        // document is never embedded, it stays behind get_service_skill. On stateless HTTP this
+        // delegate runs once per request, so the size is logged exactly once per process.
+        var instructionsLogged = 0;
         services.AddOptions<McpServerOptions>()
-            .Configure<IOptions<AggregatorOptions>>((mcpOpts, aggOpts) =>
+            .Configure<IOptions<AggregatorOptions>, ILoggerFactory>((mcpOpts, aggOpts, loggerFactory) =>
             {
                 var agg = aggOpts.Value;
                 mcpOpts.ServerInfo = new Implementation
@@ -57,7 +57,20 @@ public static class McpServerBuilderExtensions
                     Title = "MCP Aggregator",
                     Version = version,
                 };
-                mcpOpts.ServerInstructions = BuildInstructions(agg.SelfName, LoadSelfSkill(agg));
+
+                var instructions = AggregatorInstructions.Build(agg.SelfName);
+                mcpOpts.ServerInstructions = instructions;
+
+                if (Interlocked.CompareExchange(ref instructionsLogged, 1, 0) == 0)
+                {
+                    var logger = loggerFactory.CreateLogger(typeof(AggregatorInstructions));
+                    var bytes = Encoding.UTF8.GetByteCount(instructions);
+                    logger.LogInformation("MCP server instructions: {Chars} chars, {Bytes} UTF-8 bytes",
+                        instructions.Length, bytes);
+                    if (instructions.Length > AggregatorInstructions.MaxChars)
+                        logger.LogWarning("MCP server instructions exceed the {MaxChars}-char ceiling ({Chars} chars); trim AggregatorInstructions",
+                            AggregatorInstructions.MaxChars, instructions.Length);
+                }
             });
 
         // Give the aggregator's own tools the same self-correcting argument help that
@@ -322,70 +335,6 @@ public static class McpServerBuilderExtensions
            && string.CompareOrdinal(version, "2026-07-28") >= 0
             ? McpErrorCode.InvalidParams
             : McpErrorCode.ResourceNotFound;
-
-    private static string? LoadSelfSkill(AggregatorOptions options)
-    {
-        var path = Path.Combine(options.SkillsDirectoryPath, $"{options.SelfName}.md");
-        if (!File.Exists(path))
-            return null;
-
-        try
-        {
-            var content = File.ReadAllText(path);
-            return content.Length > MaxEmbeddedSkillChars
-                ? content[..MaxEmbeddedSkillChars] + "\n\n[…truncated — call get_service_skill for full text]"
-                : content;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string BuildInstructions(string selfName, string? selfSkill)
-    {
-        var header = $"""
-            MCP Aggregator — a single MCP endpoint that fans out to many downstream MCP servers.
-            One connection gives the client the union of tools across every registered server,
-            without consuming a slot per server in clients that cap concurrent MCP connections.
-
-            Downstream tools are exposed as typed tools named "<server>__<tool>" (for example
-            "microsoft-learn__microsoft_docs_search") that take the downstream tool's own parameters.
-            Downstream prompt templates are exposed as MCP prompts named "<server>__<prompt>" with the
-            downstream prompt's own arguments. Downstream resources are exposed as MCP resources with the
-            URI "mcp-aggregator://<server>/<downstream-uri>" (templates keep their <placeholder> expressions);
-            read_resource(serverName, uri) is the escape hatch when your client cannot read MCP resources.
-
-            Workflow:
-              1. find_tools(query: "<what you need>") — search every downstream for matching tools,
-                 prompts and resources. Results include each tool's exact name and input schema (each
-                 prompt's name and arguments, each resource's URI), and make them callable.
-              2. Call the "<server>__<tool>" tool directly with its listed parameters; request a
-                 "<server>__<prompt>" prompt through prompts/get with its listed arguments; read a
-                 resource through resources/read with its listed uri.
-              3. list_services() / get_service_details(serverName) — browse servers and schemas instead
-                 of searching; get_service_details also makes that server's typed tools, prompts and
-                 resources callable.
-              4. get_service_skill(serverName: "{selfName}") — full usage guide for this aggregator;
-                 get_service_skill(serverName: "<downstream>") — usage guide for a specific service.
-              5. invoke_tool(serverName, toolName, arguments) — use this when your client rejects a
-                 "<server>__<tool>" name as not found (some clients do not refresh their tool index
-                 mid-conversation even after tools/list_changed). Do not retry the typed name in that
-                 conversation. arguments is a JSON object encoded as a string. get_prompt(serverName,
-                 promptName, arguments) and read_resource(serverName, uri) are the same escape hatch
-                 for prompts and resources.
-              6. show_admin_tools() — administrative tools (register/update/unregister servers, skills,
-                 summaries, enable/disable) are hidden until you ask for them; they are also callable by name.
-
-            Downstream connections are established lazily on first use and reused across calls.
-            Start by calling find_tools or get_service_skill(serverName: "{selfName}").
-            """;
-
-        if (string.IsNullOrWhiteSpace(selfSkill))
-            return header;
-
-        return header + "\n\n---\n\n# Aggregator Skill Document\n\n" + selfSkill;
-    }
 
     private static string GetAggregatorVersion()
     {

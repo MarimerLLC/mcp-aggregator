@@ -224,14 +224,14 @@ public class AdminTools
         ServerRegistry registry,
         ConnectionManager connectionManager,
         SkillStore skillStore,
-        [Description("The name of the server to remove")] string name,
+        [Description("The name of the registered server to remove")] string serverName,
         CancellationToken ct)
     {
         await registry.EnsureLoadedAsync(ct);
-        await connectionManager.DisconnectAsync(name);
-        skillStore.Delete(name);
-        await registry.UnregisterAsync(name, ct);
-        return $"Server '{name}' unregistered successfully.";
+        await connectionManager.DisconnectAsync(serverName);
+        skillStore.Delete(serverName);
+        await registry.UnregisterAsync(serverName, ct);
+        return $"Server '{serverName}' unregistered successfully.";
     }
 
     [McpServerTool(Name = "update_skill")]

@@ -147,7 +147,7 @@ public sealed class AggregatorRig : IAsyncDisposable
         ? LegacyInstructions
         : Client.ServerInstructions ?? string.Empty;
 
-    // The pre-#39 header from McpServerBuilderExtensions.BuildInstructions, verbatim, so the
+    // The pre-#39 header (the ancestor of AggregatorInstructions, issue #44), verbatim, so the
     // invoke_tool condition is the old product rather than the new product with tools hidden.
     private const string LegacyInstructions = """
         MCP Aggregator — a single MCP endpoint that fans out to many downstream MCP servers.

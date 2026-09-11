@@ -1,6 +1,6 @@
 # MCP Aggregator Skill Guide
 
-This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection. The aggregator exposes both an **MCP tool interface** and an equivalent **REST API** — use whichever fits your client.
+This server acts as a unified gateway to multiple downstream MCP servers. Instead of connecting to each server individually, use the aggregator to discover, inspect, and invoke tools across all registered servers through a single connection. The aggregator exposes both an **MCP tool interface** and an equivalent **REST API** — use whichever fits your client. The server instructions you received on connect are the short version of this document; this is the full reference.
 
 Every downstream tool is available as a **typed tool named `{server}__{tool}`** (for example `microsoft-learn__microsoft_docs_search`) that takes the downstream tool's own parameters. Use those when your client lets you call them; use `invoke_tool` when it does not (see *Client capability* below). Both reach the same downstream tool. Every downstream prompt template is likewise available as an **MCP prompt named `{server}__{prompt}`** with the downstream prompt's own arguments; `get_prompt` is the fallback for clients without prompt support. Every downstream resource is available as an **MCP resource at `mcp-aggregator://{server}/{uri}`** (the downstream's own URI after the server prefix); `read_resource` is the fallback for clients without resource support.
 
@@ -155,6 +155,7 @@ Content-Type: application/json
 - **Resource errors:** likewise, an unknown `mcp-aggregator://{server}/{uri}` (no such server, disabled server, or a URI no resource or template on that server matches) or an unreachable server comes back as a JSON-RPC error whose message says which and lists the server's real resource URIs and templates. A URI that is not in aggregator form is rejected with the expected form. `read_resource` returns the same messages as an error result.
 - **Tool call failures:** Verify that `serverName` and `toolName` exactly match values from `list_services`. Tool names are case-sensitive.
 - **Slow first call:** Connections to downstream servers are lazy. The first call to a server may take longer as the connection is established. Subsequent calls will be faster.
+
 ## Tips
 
 - The `list_services` descriptions are AI-generated summaries written for AI consumers — they use precise technical language to help with routing decisions. Summaries are generated from the server's full capability set (tools and prompt templates) at registration time. If a server's capabilities change significantly, use `regenerate_summary` to refresh the summary.
