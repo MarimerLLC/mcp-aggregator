@@ -116,8 +116,10 @@ collides silently.
 
 `invoke_tool` and `get_prompt` remain, described as escape hatches (`get_prompt` now returns a
 `CallToolResult` so its failures are `isError` results rather than bare faults, and its input
-schema is unchanged). The REST invoke endpoint is unchanged and still uses the generic path. The self skill and the server instructions steer the
-model to `find_tools` and the typed tools first.
+schema is unchanged). The REST invoke endpoint is unchanged and still uses the generic path. The
+server instructions (the short orientation, see Q13) and the self skill document (the full
+reference, behind `get_service_skill`) both steer the model to `find_tools` and the typed tools
+first.
 
 ### Q5 — Wisp interaction
 
@@ -306,6 +308,41 @@ Covered by `ResourceUriNamingTests`, `DownstreamResourceWrapperTests`,
 `subscriptions/listen { resourcesListChanged }` path for 2026-07-28 clients, the error-code split,
 the subscribe rejection and the `read_resource` escape hatch), the resource third of
 `WrapperToolCatalogTests`, `ToolIndexTests`, `McpServerWiringTests` and `ToolSchemaTests`.
+
+### Q13 — What goes in `ServerInstructions` (issue #44)
+
+Since #28 the handshake `instructions` were a ~2.5 KB hardcoded header plus the self skill
+document capped at 16 KB. The document grew past the cap (23 KB), so every `initialize` /
+`server/discover` response carried ~18.5 KB that ended mid-sentence with a `[…truncated]` marker,
+and most of it restated what `tools/list` already delivers (tool descriptions, admin parameter
+tables) or the header itself.
+
+**Decision: the handshake carries a short hand-written orientation only.** `AggregatorInstructions`
+is a constant with just the aggregator's name interpolated: what the aggregator is, the three
+naming conventions, the three-step workflow, the client-capability caveat with the `invoke_tool` /
+`get_prompt` / `read_resource` escape hatches, "admin tools are hidden", "connections are lazy",
+and a pointer to `get_service_skill(serverName: "mcp-aggregator")`. It names tools where the
+workflow needs them but never repeats a tool's `[Description]` text or parameters.
+
+- The skill document is **never embedded**. It stays the full, stand-alone reference behind
+  `get_service_skill`, un-capped and never truncated. `LoadSelfSkill`, the 16 KB cap and the
+  truncation marker are gone.
+- **Tool call, not a resource, is the access path.** Tool calls are model-invocable on every host;
+  resources are user-attached on Claude Desktop and ignored by many clients. Exposing skill
+  documents as MCP resources is a separate follow-up.
+- **No runtime cap setting.** A cap on a constant would guard nothing. `AggregatorInstructions.MaxChars`
+  (6 KB) is pinned by `ServerInstructionsTests`, and the actual size is logged once at startup
+  (`MCP server instructions: {Chars} chars, {Bytes} UTF-8 bytes`; a warning if over the ceiling).
+  On stateless HTTP the options delegate runs per request, so the log is guarded with an
+  interlocked flag.
+- Behavioural change: hosts that relied on the embedded skill in the system prompt now have to
+  call `get_service_skill` for error handling and admin details. The header keeps the two things
+  that measurably mattered in the runs above (the workflow and the client-capability caveat).
+
+Covered by `ServerInstructionsTests` (ceiling, pointer, no restated tool descriptions, same text on
+every options instance) and `AdminDisclosureTests.Lazy_Handshake_IsShort_AndFullSkillStaysBehindGetServiceSkill`
+(end to end: a 30 KB self skill never reaches the handshake but comes back whole from
+`get_service_skill`).
 
 ## Measurements
 
@@ -550,6 +587,11 @@ grouped by `via` and `result`.
 | Eager | | | |
 | Lazy (before activation) | | | |
 | Lazy (after `find_tools`) | | | |
+
+| Handshake payload | `ServerInstructions` chars | UTF-8 bytes | Notes |
+|---|---|---|---|
+| Before #44 | ≈ 18,900 | ≈ 19,000 | 2.5 KB header + self skill capped at 16 KB, cut mid-text with `[…truncated]` |
+| After #44 | 1,588 | 1,588 | orientation only; skill behind `get_service_skill` |
 
 #### Host behavior
 

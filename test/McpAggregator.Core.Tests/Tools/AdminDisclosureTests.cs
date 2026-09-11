@@ -29,6 +29,9 @@ public class AdminDisclosureTests
 {
     private const string Downstream = "probe";
 
+    // Written into every rig's self skill: the handshake must not carry it, get_service_skill must.
+    private const string SkillSentinel = "SENTINEL-FULL-SKILL-ONLY-BEHIND-GET-SERVICE-SKILL";
+
     private string _dataDir = null!;
 
     [TestInitialize]
@@ -71,6 +74,16 @@ public class AdminDisclosureTests
 
     private async Task<Rig> BuildAsync(WrapperToolMode mode)
     {
+        // A self skill well past the old 16 KB embedding cap (issue #44). Tests that need a
+        // specific document write their own before calling BuildAsync.
+        var skillPath = Path.Combine(_dataDir, "skills", "mcp-aggregator.md");
+        if (!File.Exists(skillPath))
+        {
+            Directory.CreateDirectory(Path.Combine(_dataDir, "skills"));
+            var body = string.Join("\n", Enumerable.Repeat("Filler paragraph for the aggregator skill document.", 600));
+            await File.WriteAllTextAsync(skillPath, $"# guide\n\n{SkillSentinel}\n\n{body}\n");
+        }
+
         var server = TestHelpers.StdioServer(Downstream);
         var expectations = new IRegistryPersistenceCreateExpectations();
         expectations.Setups.LoadAsync(Arg.Any<CancellationToken>())
@@ -226,6 +239,33 @@ public class AdminDisclosureTests
 
         Assert.IsTrue(result.IsError ?? false);
         StringAssert.Contains(TextOf(result), "hidden until show_admin_tools");
+    }
+
+    // ---------------------------------------------------------------- the handshake (issue #44)
+
+    [TestMethod]
+    public async Task Lazy_Handshake_IsShort_AndFullSkillStaysBehindGetServiceSkill()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+        Assert.IsTrue(new FileInfo(Path.Combine(_dataDir, "skills", "mcp-aggregator.md")).Length > 30 * 1024);
+
+        var instructions = rig.Client.ServerInstructions;
+        Assert.IsFalse(string.IsNullOrWhiteSpace(instructions));
+        Assert.IsTrue(instructions!.Length <= AggregatorInstructions.MaxChars, $"Handshake carried {instructions.Length} chars.");
+        Assert.IsFalse(instructions.Contains(SkillSentinel, StringComparison.Ordinal), "The self skill must not be embedded in the handshake.");
+        Assert.IsFalse(instructions.Contains("truncated", StringComparison.OrdinalIgnoreCase));
+        StringAssert.Contains(instructions, "get_service_skill(serverName: \"mcp-aggregator\")");
+
+        var skill = await rig.Client.CallToolAsync("get_service_skill",
+            new Dictionary<string, object?> { ["serverName"] = "mcp-aggregator" }, cancellationToken: TestTimeout);
+        Assert.IsFalse(skill.IsError ?? false, TextOf(skill));
+        StringAssert.Contains(TextOf(skill), SkillSentinel, "get_service_skill returns the full document.");
+        Assert.IsTrue(TextOf(skill).Length > 30 * 1024, "The document must come back whole, not capped.");
+
+        var services = await rig.Client.CallToolAsync("list_services", cancellationToken: TestTimeout);
+        Assert.IsFalse(services.IsError ?? false, TextOf(services));
+        using var doc = JsonDocument.Parse(TextOf(services));
+        Assert.IsTrue(doc.RootElement.EnumerateArray().Any(e => e.GetProperty("name").GetString() == "mcp-aggregator"), "The self entry is still listed.");
     }
 
     // ---------------------------------------------------------------- the aggregator's own entry

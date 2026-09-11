@@ -25,6 +25,9 @@ dotnet run --project src/McpAggregator.StdioServer     # Run stdio server
    `ResourceCollection` at runtime, and it only ever adds or removes `DownstreamToolWrapper` /
    `DownstreamPromptWrapper` / `DownstreamResourceWrapper` instances.** The aggregator's own attributed
    tools are never touched.
+6. **`ServerInstructions` is the hand-written orientation in `AggregatorInstructions`** (ceiling 6 KB, pinned
+   by `ServerInstructionsTests`); the skill document is never embedded in the handshake, it stays behind
+   `get_service_skill(serverName: "mcp-aggregator")` (issue #44).
 
 ## Typed wrapper tools (issue #39), proxied prompts (issue #40) and bridged resources (issue #45)
 
