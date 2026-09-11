@@ -344,6 +344,23 @@ every options instance) and `AdminDisclosureTests.Lazy_Handshake_IsShort_AndFull
 (end to end: a 30 KB self skill never reaches the handshake but comes back whole from
 `get_service_skill`).
 
+Follow-ups from the first Claude Desktop round on 1.0.1, fixed in the same PR:
+
+- With the skill out of the handshake, `get_service_skill` was named only in the connect string
+  and the self entry's description, and an agent that goes straight to `find_tools` passes
+  neither. The `list_services` description now carries the breadcrumb too
+  (`ServerInstructionsTests.ListServicesDescription_CarriesTheSkillBreadcrumb`).
+- `get_prompt` without a required argument came back as a bare "Tool execution failed": the
+  required-argument pre-flight lived only in `DownstreamPromptWrapper`, and a downstream fault on a
+  known prompt escaped `ConsumerTools.GetPrompt` as an unhandled `McpProtocolException` that the
+  SDK sanitized. The pre-flight now runs in `ToolProxyHandler.GetPromptAsync` (both paths), and the
+  escape hatch returns the downstream message with the prompt's real signature as an error result
+  (`PromptListChangedEndToEndTests.GetPromptTool_MissingRequiredArgument_*` / `_DownstreamFault_*`).
+- The self entry's admin tools reported `inputSchema: null` because `ToolIndex.OwnTools` built them
+  from reflection (`AdminTools.Describe`) rather than from the built `AdminToolSet`, which carries
+  the schemas. It now reads `AdminToolSet` when hosted with the MCP server and falls back to the
+  schema-less reflection list otherwise (`ListServices_SelfEntry_DescribesTheAggregatorsOwnTools`).
+
 ## Measurements
 
 ### How to run them

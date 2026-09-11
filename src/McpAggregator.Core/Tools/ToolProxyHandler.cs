@@ -422,6 +422,28 @@ public class ToolProxyHandler
 
         try
         {
+            // Pre-flight on the shared path so the escape hatch names a missing argument the same
+            // way the proxied prompt does; a downstream's own rejection is often a bare fault with
+            // no argument name (seen with get_prompt on Claude Desktop). Best-effort: an unknown or
+            // unreachable server skips the check and gets its usual error from the call below.
+            var detail = await TryGetPromptDetailAsync(serverName, promptName, ct);
+            if (detail is not null)
+            {
+                var missing = detail.Arguments
+                    .Where(a => a.Required && (args is null || !args.ContainsKey(a.Name)))
+                    .Select(a => a.Name)
+                    .ToList();
+                if (missing.Count > 0)
+                {
+                    resultLabel = "invalid_arguments";
+                    _logger.LogWarning("Prompt '{Prompt}' on '{Server}' requested without required argument(s) [{Missing}]",
+                        promptName, serverName, string.Join(", ", missing));
+                    throw new AggregatorException(
+                        $"Missing required argument(s): [{string.Join(", ", missing)}] for prompt '{promptName}' on server '{serverName}'. " +
+                        $"Arguments: {DescribePromptArguments(detail.Arguments)}");
+                }
+            }
+
             var result = await _connectionManager.ExecuteWithRetryAsync<GetPromptResult>(serverName,
                 async (client, token) => await client.GetPromptAsync(promptName, args, cancellationToken: token), cts.Token);
 
@@ -470,6 +492,42 @@ public class ToolProxyHandler
             AggregatorTelemetry.PromptGets.Add(1, tags);
             AggregatorTelemetry.PromptGetDuration.Record(sw.Elapsed.TotalSeconds,
                 new TagList { { "server_name", serverName }, { "prompt_name", promptName }, { "via", via } });
+        }
+    }
+
+    /// <summary>
+    /// The prompt's argument list in the form the error messages use, e.g.
+    /// <c>[text (required): Text to summarize, style (optional)]</c>; null when the server or
+    /// prompt is unknown or unreachable. Used by the <c>get_prompt</c> escape hatch to attach the
+    /// real signature to a downstream fault.
+    /// </summary>
+    public async Task<string?> TryDescribePromptArgumentsAsync(string serverName, string promptName, CancellationToken ct)
+    {
+        var detail = await TryGetPromptDetailAsync(serverName, promptName, ct);
+        return detail is null ? null : DescribePromptArguments(detail.Arguments);
+    }
+
+    public static string DescribePromptArguments(IReadOnlyList<PromptArgumentDetail> arguments)
+    {
+        if (arguments.Count == 0)
+            return "(none)";
+
+        return "[" + string.Join(", ", arguments.Select(a =>
+            a.Name + (a.Required ? " (required)" : " (optional)") +
+            (string.IsNullOrWhiteSpace(a.Description) ? string.Empty : $": {a.Description.Trim()}"))) + "]";
+    }
+
+    private async Task<PromptDetail?> TryGetPromptDetailAsync(string serverName, string promptName, CancellationToken ct)
+    {
+        try
+        {
+            var prompts = await _toolIndex.GetPromptsForServerAsync(serverName, ct);
+            return prompts.FirstOrDefault(p => string.Equals(p.Name, promptName, StringComparison.Ordinal));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not look up prompt '{Prompt}' on '{Server}' for pre-flight", promptName, serverName);
+            return null;
         }
     }
 

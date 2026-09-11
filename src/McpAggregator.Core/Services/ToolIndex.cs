@@ -19,6 +19,7 @@ public class ToolIndex
     private readonly SkillStore _skillStore;
     private readonly AggregatorOptions _options;
     private readonly IOptions<McpServerOptions>? _mcpServerOptions;
+    private readonly AdminToolSet? _adminTools;
     private readonly ILogger<ToolIndex> _logger;
 
     private readonly ConcurrentDictionary<string, CachedTools> _cache = new(StringComparer.OrdinalIgnoreCase);
@@ -59,13 +60,15 @@ public class ToolIndex
         SkillStore skillStore,
         IOptions<AggregatorOptions> options,
         ILogger<ToolIndex> logger,
-        IOptions<McpServerOptions>? mcpServerOptions = null)
+        IOptions<McpServerOptions>? mcpServerOptions = null,
+        AdminToolSet? adminTools = null)
     {
         _registry = registry;
         _connectionManager = connectionManager;
         _skillStore = skillStore;
         _options = options.Value;
         _mcpServerOptions = mcpServerOptions;
+        _adminTools = adminTools;
         _logger = logger;
 
         _registry.RegistryChanged += () =>
@@ -221,10 +224,30 @@ public class ToolIndex
             }
         }
 
-        foreach (var (name, description) in AdminTools.Describe())
+        // AdminToolSet carries the built tools with their input schemas; the reflection-only
+        // Describe() is the fallback when the index is hosted without the MCP server (REST-only
+        // tests), where a schema-less entry is better than none.
+        if (_adminTools is not null)
         {
-            if (seen.Add(name))
-                tools.Add(new ToolDetail { Name = name, Description = description, WrapperName = name });
+            foreach (var tool in _adminTools.Tools)
+            {
+                if (seen.Add(tool.ProtocolTool.Name))
+                    tools.Add(new ToolDetail
+                    {
+                        Name = tool.ProtocolTool.Name,
+                        Description = tool.ProtocolTool.Description,
+                        InputSchema = tool.ProtocolTool.InputSchema,
+                        WrapperName = tool.ProtocolTool.Name,
+                    });
+            }
+        }
+        else
+        {
+            foreach (var (name, description) in AdminTools.Describe())
+            {
+                if (seen.Add(name))
+                    tools.Add(new ToolDetail { Name = name, Description = description, WrapperName = name });
+            }
         }
 
         return tools;

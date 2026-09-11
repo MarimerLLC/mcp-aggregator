@@ -3,6 +3,7 @@ using System.Text.Json;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Services;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -76,7 +77,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "list_services")]
-    [Description("List all registered MCP servers with a concise summary of each server's available tools. Each tool entry includes its typed wrapper name ('{server}__{tool}'); use find_tools or get_service_details to make those callable and get their schemas.")]
+    [Description("List all registered MCP servers with a concise summary of each server's available tools. Each tool entry includes its typed wrapper name ('{server}__{tool}'); use find_tools or get_service_details to make those callable and get their schemas. Call get_service_skill(serverName) before using a server for the first time; get_service_skill(serverName: 'mcp-aggregator') is this aggregator's full usage guide.")]
     public static async Task<string> ListServices(
         ServerRegistry registry,
         ToolIndex toolIndex,
@@ -216,6 +217,16 @@ public class ConsumerTools
         catch (AggregatorException ex) when (!ct.IsCancellationRequested)
         {
             return ErrorResult(ex.Message);
+        }
+        catch (McpProtocolException ex) when (!ct.IsCancellationRequested)
+        {
+            // A known prompt the downstream itself rejected. Left uncaught, the SDK sanitizes this
+            // to a bare "An error occurred invoking 'get_prompt'"; return the downstream's message
+            // with the prompt's real signature instead, as the proxied prompt does.
+            var signature = await proxy.TryDescribePromptArgumentsAsync(serverName, promptName, ct);
+            return ErrorResult(
+                $"Prompt '{promptName}' on server '{serverName}' failed: {ex.Message}" +
+                (signature is null ? string.Empty : $" Arguments: {signature}"));
         }
         catch (JsonException ex) when (!ct.IsCancellationRequested)
         {

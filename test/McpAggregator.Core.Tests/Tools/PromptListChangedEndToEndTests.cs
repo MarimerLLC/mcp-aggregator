@@ -52,7 +52,8 @@ public class PromptListChangedEndToEndTests
     private static string Echo([SysDescription("Message to echo")] string message) => "echo:" + message;
 
     [SysDescription("Summarizes a document.")]
-    private static string Summarize([SysDescription("Text to summarize")] string text) => "Summarize: " + text;
+    private static string Summarize([SysDescription("Text to summarize")] string text)
+        => text == "boom" ? throw new InvalidOperationException("downstream exploded") : "Summarize: " + text;
 
     private static CancellationToken TestTimeout => new CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
 
@@ -399,6 +400,46 @@ public class PromptListChangedEndToEndTests
         Assert.IsTrue(result.IsError ?? false);
         StringAssert.Contains(TextOf(result), "Available prompts: [summarize]");
         StringAssert.Contains(TextOf(result), "promptName: \"summarize\"");
+    }
+
+    [TestMethod]
+    public async Task GetPromptTool_MissingRequiredArgument_ReturnsAnErrorResultNamingTheArgument()
+    {
+        // Seen on Claude Desktop: get_prompt without a required argument came back as a bare
+        // "Tool execution failed" because only the proxied prompt had the pre-flight.
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+        var (client, _) = await ConnectAsync(rig);
+
+        var result = await client.CallToolAsync("get_prompt",
+            new Dictionary<string, object?>
+            {
+                ["serverName"] = Downstream,
+                ["promptName"] = "summarize",
+                ["arguments"] = """{"style":"terse"}"""
+            }, cancellationToken: TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false, TextOf(result));
+        StringAssert.Contains(TextOf(result), "Missing required argument(s): [text]");
+        StringAssert.Contains(TextOf(result), "text (required)");
+    }
+
+    [TestMethod]
+    public async Task GetPromptTool_DownstreamFault_ReturnsAnErrorResultWithTheSignature()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+        var (client, _) = await ConnectAsync(rig);
+
+        var result = await client.CallToolAsync("get_prompt",
+            new Dictionary<string, object?>
+            {
+                ["serverName"] = Downstream,
+                ["promptName"] = "summarize",
+                ["arguments"] = """{"text":"boom"}"""
+            }, cancellationToken: TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false, "A downstream fault on a known prompt must be an error result, not an unhandled exception.");
+        StringAssert.Contains(TextOf(result), "Prompt 'summarize' on server 'probe' failed:");
+        StringAssert.Contains(TextOf(result), "text (required)");
     }
 
     [TestMethod]

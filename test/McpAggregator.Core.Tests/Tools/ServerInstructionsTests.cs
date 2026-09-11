@@ -90,6 +90,19 @@ public class ServerInstructionsTests
     }
 
     [TestMethod]
+    public void ListServicesDescription_CarriesTheSkillBreadcrumb()
+    {
+        // With the skill out of the handshake, an agent that never reads the instructions still
+        // needs to meet get_service_skill on the always-listed surface.
+        using var provider = BuildProvider();
+
+        var collection = provider.GetRequiredService<IOptions<McpServerOptions>>().Value.ToolCollection!;
+        Assert.IsTrue(collection.TryGetPrimitive("list_services", out var listServices));
+
+        StringAssert.Contains(listServices!.ProtocolTool.Description, "get_service_skill(serverName: 'mcp-aggregator')");
+    }
+
+    [TestMethod]
     public void Instructions_DoNotRestateToolDescriptions()
     {
         using var provider = BuildProvider();

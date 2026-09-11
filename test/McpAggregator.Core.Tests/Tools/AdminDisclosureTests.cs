@@ -301,6 +301,17 @@ public class AdminDisclosureTests
         using var detailDoc = JsonDocument.Parse(TextOf(details));
         Assert.AreEqual(ToolIndex.SelfId, detailDoc.RootElement.GetProperty("id").GetString());
         Assert.IsTrue(detailDoc.RootElement.GetProperty("tools").EnumerateArray().Any(t => t.GetProperty("name").GetString() == "update_skill"));
+
+        // Admin entries used to come from reflection with no schema (inputSchema: null on Claude
+        // Desktop); they now come from AdminToolSet like the consumer tools do.
+        foreach (var tool in detailDoc.RootElement.GetProperty("tools").EnumerateArray())
+        {
+            var name = tool.GetProperty("name").GetString();
+            Assert.IsTrue(tool.TryGetProperty("inputSchema", out var schema) && schema.ValueKind == JsonValueKind.Object,
+                $"'{name}' has no inputSchema in the self entry's details.");
+            if (name == "register_server")
+                Assert.IsTrue(schema.GetProperty("properties").TryGetProperty("name", out _), "register_server's schema must carry its parameters.");
+        }
     }
 
     // ---------------------------------------------------------------- eager
