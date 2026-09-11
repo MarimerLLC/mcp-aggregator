@@ -300,6 +300,8 @@ public class AdminDisclosureTests
         Assert.IsFalse(details.IsError ?? false, TextOf(details));
         using var detailDoc = JsonDocument.Parse(TextOf(details));
         Assert.AreEqual(ToolIndex.SelfId, detailDoc.RootElement.GetProperty("id").GetString());
+        Assert.AreEqual(rig.Client.ServerInstructions, detailDoc.RootElement.GetProperty("remoteInstructions").GetString(),
+            "The self entry's remoteInstructions is what this server says on connect, like any downstream's.");
         Assert.IsTrue(detailDoc.RootElement.GetProperty("tools").EnumerateArray().Any(t => t.GetProperty("name").GetString() == "update_skill"));
 
         // Admin entries used to come from reflection with no schema (inputSchema: null on Claude

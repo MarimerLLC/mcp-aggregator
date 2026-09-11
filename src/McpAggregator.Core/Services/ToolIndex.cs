@@ -289,6 +289,9 @@ public class ToolIndex
                 RemoteName = self.RemoteName,
                 RemoteTitle = self.RemoteTitle,
                 RemoteVersion = self.RemoteVersion,
+                // The same meaning as for a downstream: what this server says on connect. Hosts
+                // that hide the initialize instructions (Claude Desktop) can read them here.
+                RemoteInstructions = _mcpServerOptions?.Value.ServerInstructions,
                 Tools = OwnTools(),
             };
         }
