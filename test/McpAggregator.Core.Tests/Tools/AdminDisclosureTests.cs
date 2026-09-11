@@ -154,6 +154,22 @@ public class AdminDisclosureTests
             "AdminTools.ToolNames must list exactly the tools declared on AdminTools; it is what Lazy mode hides.");
     }
 
+    [TestMethod]
+    public async Task AdminTools_ThatReferToAServer_AllTakeServerName()
+    {
+        // register_server mints a new name, so it takes 'name'; every other admin tool refers to
+        // an existing server and takes 'serverName', like the consumer tools do.
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        foreach (var tool in rig.Provider.GetRequiredService<AdminToolSet>().Tools)
+        {
+            var expected = tool.ProtocolTool.Name == "register_server" ? "name" : "serverName";
+            var properties = tool.ProtocolTool.InputSchema.GetProperty("properties");
+            Assert.IsTrue(properties.TryGetProperty(expected, out _),
+                $"{tool.ProtocolTool.Name} should take '{expected}'; it has [{string.Join(", ", properties.EnumerateObject().Select(p => p.Name))}].");
+        }
+    }
+
     // ---------------------------------------------------------------- lazy
 
     [TestMethod]

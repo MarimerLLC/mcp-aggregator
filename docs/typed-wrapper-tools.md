@@ -360,6 +360,16 @@ Follow-ups from the first Claude Desktop round on 1.0.1, fixed in the same PR:
   from reflection (`AdminTools.Describe`) rather than from the built `AdminToolSet`, which carries
   the schemas. It now reads `AdminToolSet` when hosted with the MCP server and falls back to the
   schema-less reflection list otherwise (`ListServices_SelfEntry_DescribesTheAggregatorsOwnTools`).
+- `get_service_details(serverName: "mcp-aggregator")` left `remoteInstructions` null while every
+  downstream entry carries what that server said on connect. The self entry now reports the
+  aggregator's own `ServerInstructions` there, so a host that hides the `initialize` response can
+  still read the orientation (asserted in the same test).
+- Second round on 1.0.3: step 1 of the orientation read as a guarantee ("makes them callable")
+  with the client-capability qualifier four paragraphs later; it now says "where your client
+  honors list_changed" inline. And `unregister_server` took `name` while the other reference-style
+  admin tools take `serverName`; it now takes `serverName` (`register_server` keeps `name`, since
+  it mints one). A stale caller gets the binding hint naming the parameter
+  (`AdminDisclosureTests.AdminTools_ThatReferToAServer_AllTakeServerName`).
 
 ## Measurements
 

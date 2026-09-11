@@ -28,7 +28,8 @@ internal static class AggregatorInstructions
         Workflow:
           1. find_tools(query) to search every server for what you need, or list_services then
              get_service_details(serverName) to browse. Either one makes the matching typed tools, prompts
-             and resources callable in your session.
+             and resources callable in your session where your client honors list_changed (see
+             "Client capability" below for the ones that do not).
           2. Call the typed tool by its listed name with its listed parameters; use prompts/get and
              resources/read for prompts and resources.
           3. Read get_service_skill(serverName) before using a server for the first time.
