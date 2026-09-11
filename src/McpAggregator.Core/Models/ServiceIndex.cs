@@ -20,9 +20,11 @@ public class ServiceIndex
     public string? RemoteTitle { get; set; }
     public string? RemoteVersion { get; set; }
 
-    // Skill staleness signal. "fresh" = current tools/prompts/version match the snapshot
-    // captured when the skill was authored; "stale" = drift detected; "unknown" = no
-    // snapshot recorded or the server was unreachable at read time.
+    // Skill staleness signal, compared against the snapshot captured when the skill was
+    // authored. "fresh" = the tool names, descriptions and input schemas, the prompt names,
+    // descriptions and arguments, and (when one was recorded) the server's reported version
+    // all match; "stale" = any of those drifted; "unknown" = no snapshot recorded, or the
+    // server's tools or prompts could not be read at read time.
     public string? SkillFreshness { get; set; }
     public string? SkillRecordedVersion { get; set; }
     public DateTimeOffset? SkillRecordedAt { get; set; }

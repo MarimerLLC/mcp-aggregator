@@ -213,8 +213,11 @@ public class AdminController : ControllerBase
         _registry.Get(name); // Validate exists
         await _skillStore.SetAsync(name, request.Markdown, ct);
         await _registry.UpdateSkillFlagAsync(name, true, ct);
-        await SkillSnapshot.CaptureAsync(_registry, _toolIndex, name, ct);
-        return Ok(new { message = $"Skill document updated for '{name}'." });
+        var baselineRecorded = await SkillSnapshot.CaptureAsync(_registry, _toolIndex, name, ct);
+        var message = baselineRecorded
+            ? $"Skill document updated for '{name}'."
+            : $"Skill document updated for '{name}'. {SkillSnapshot.NoBaselineNote}";
+        return Ok(new { message });
     }
 
     [HttpPost("{name}/enable")]
