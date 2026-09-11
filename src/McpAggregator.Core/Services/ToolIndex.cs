@@ -133,9 +133,13 @@ public class ToolIndex
                     {
                         prompts = await GetPromptsForServerAsync(server.Name, ct);
                     }
-                    catch
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        prompts = [];
+                        // "No prompt support" is already an empty list from GetPromptsForServerAsync;
+                        // anything that throws is a real failure. Leave prompts null so freshness
+                        // reads "unknown" rather than a false "stale" against an empty prompt set.
+                        _logger.LogDebug(ex, "Failed to get prompts for '{Server}'; skill freshness is unknown", server.Name);
+                        prompts = null;
                     }
                 }
             }
@@ -152,6 +156,12 @@ public class ToolIndex
         return results;
     }
 
+    /// <summary>
+    /// <c>null</c> without a skill document; <c>unknown</c> when no baseline was recorded or the
+    /// current tools or prompts could not be read; <c>stale</c> when the recorded version (if one
+    /// was recorded) differs from the server's current version or the recorded fingerprint no longer
+    /// matches (see <see cref="SkillFingerprint"/>); otherwise <c>fresh</c>.
+    /// </summary>
     private static string? ComputeFreshness(
         RegisteredServer server,
         IReadOnlyList<ToolDetail>? currentTools,
@@ -163,14 +173,16 @@ public class ToolIndex
         if (string.IsNullOrEmpty(server.SkillRecordedFingerprint))
             return "unknown";
 
-        if (currentTools is null)
+        if (currentTools is null || currentPrompts is null)
             return "unknown";
 
-        var currentFingerprint = SkillFingerprint.Compute(
-            currentTools.Select(t => t.Name),
-            currentPrompts?.Select(p => p.Name) ?? []);
+        if (server.SkillRecordedVersion is not null
+            && !string.Equals(server.SkillRecordedVersion, server.RemoteVersion, StringComparison.Ordinal))
+        {
+            return "stale";
+        }
 
-        return string.Equals(currentFingerprint, server.SkillRecordedFingerprint, StringComparison.Ordinal)
+        return SkillFingerprint.Matches(server.SkillRecordedFingerprint, currentTools, currentPrompts)
             ? "fresh"
             : "stale";
     }
@@ -262,14 +274,15 @@ public class ToolIndex
         var server = _registry.Get(serverName);
         var tools = await GetToolsForServerAsync(serverName, ct);
 
-        List<PromptDetail> prompts = [];
+        // Null (not empty) on failure so freshness reads "unknown"; the DTO list falls back to empty.
+        List<PromptDetail>? prompts = null;
         try
         {
             prompts = await GetPromptsForServerAsync(serverName, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogDebug(ex, "Server '{Server}' does not expose prompts", serverName);
+            _logger.LogDebug(ex, "Failed to get prompts for '{Server}'; skill freshness is unknown", serverName);
         }
 
         List<ResourceDetail> resources = [];
@@ -299,7 +312,7 @@ public class ToolIndex
             SkillRecordedVersion = server.SkillRecordedVersion,
             SkillRecordedAt = server.SkillRecordedAt,
             Tools = tools,
-            Prompts = prompts,
+            Prompts = prompts ?? [],
             Resources = resources
         };
     }

@@ -248,8 +248,10 @@ public class AdminTools
         registry.Get(serverName); // Validate server exists
         await skillStore.SetAsync(serverName, markdown, ct);
         await registry.UpdateSkillFlagAsync(serverName, true, ct);
-        await SkillSnapshot.CaptureAsync(registry, toolIndex, serverName, ct);
-        return $"Skill document updated for '{serverName}'.";
+        var baselineRecorded = await SkillSnapshot.CaptureAsync(registry, toolIndex, serverName, ct);
+        return baselineRecorded
+            ? $"Skill document updated for '{serverName}'."
+            : $"Skill document updated for '{serverName}'. {SkillSnapshot.NoBaselineNote}";
     }
 
     private static async Task<string?> GenerateSummaryForServerAsync(

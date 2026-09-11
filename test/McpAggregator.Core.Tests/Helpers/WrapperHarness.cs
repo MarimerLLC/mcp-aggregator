@@ -46,6 +46,14 @@ internal sealed class WrapperHarness : IAsyncDisposable
     /// </summary>
     public Dictionary<string, McpServerResourceCollection> DownstreamResources { get; private set; } = null!;
 
+    /// <summary>
+    /// Applied to each downstream's <see cref="McpServerOptions"/> as it is spawned (so on every
+    /// connect), keyed by server name. Lets a test install request handlers or filters on a
+    /// downstream — for instance a <c>prompts/list</c> handler that throws, to simulate a downstream
+    /// whose prompt listing fails (issue #41).
+    /// </summary>
+    public Action<string, McpServerOptions>? ConfigureDownstream { get; set; }
+
     /// <summary>A non-wrapper tool that lives in the aggregator's collection; the catalog must never touch it.</summary>
     public McpServerTool Sentinel { get; private set; } = null!;
 
@@ -226,6 +234,7 @@ internal sealed class WrapperHarness : IAsyncDisposable
             PromptCollection = DownstreamPrompts.TryGetValue(serverName, out var prompts) ? prompts : null,
             ResourceCollection = DownstreamResources.TryGetValue(serverName, out var resources) ? resources : null
         };
+        ConfigureDownstream?.Invoke(serverName, options);
         var server = InMemoryMcpServer.Host(serverName, options);
         lock (_spawnLock) _spawned.Add(server);
         return server;

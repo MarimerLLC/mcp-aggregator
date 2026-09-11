@@ -237,8 +237,17 @@ Covered by `DownstreamPromptWrapperTests`, `PromptListChangedEndToEndTests` (the
 
 `data/skills/mcp-aggregator.md` now teaches the wrapper-first workflow. Per-server skill docs that
 show `invoke_tool(...)` examples still work; rewrite them to the typed form as they are touched.
-`SkillFingerprint` was left as is (tool and prompt names): a rename already changes the server
-entry, and a schema change is caught by the index fingerprint rather than the skill fingerprint.
+`SkillFingerprint` (tightened in [issue #41](https://github.com/MarimerLLC/mcp-aggregator/issues/41))
+is a full SHA-256 over each tool's name, description and input schema (canonical JSON, object keys
+sorted at every level so property order does not flap it) and each prompt's name, description and
+arguments (name, description, required). `ToolIndex.ComputeFreshness` also compares the recorded
+server version against the current one when a version was recorded, and reports `unknown` (not a
+false `stale`) when the prompt fetch fails at read time; `SkillSnapshot.CaptureAsync` refuses to
+bake a failed prompt fetch into the baseline, clears any earlier snapshot and returns `false` so
+`update_skill` can say that no baseline was recorded. Fingerprints recorded before #41 are 16 hex
+characters over names only; `SkillFingerprint.Matches` recognises that format and compares with the
+old algorithm, so an upgrade does not flip existing skills to `stale`. The next `update_skill`
+records the 64-hex format.
 
 ### Q12 — Resource bridging
 
