@@ -7,6 +7,7 @@ using McpAggregator.Core.Storage;
 using McpAggregator.Core.Tests.Helpers;
 using McpAggregator.Core.Tools;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Rocks;
@@ -148,8 +149,102 @@ public class ToolProxyIsErrorTests
 
         Assert.IsTrue(result.IsError ?? false);
         var text = TextOf(result);
-        StringAssert.Contains(text, "a supplied value did not match its declared type");
+        StringAssert.Contains(text, "Parameter 'to' is declared as array but you sent a string.");
         StringAssert.Contains(text, "\"type\":\"array\"", "The schema must be attached so the caller can fix the shape.");
+    }
+
+    [SysDescription("Moves an email. Always fails at runtime in this test double.")]
+    private static string MoveEmail(
+        [SysDescription("Account")] string accountId,
+        [SysDescription("Message")] string emailId,
+        [SysDescription("Destination folder")] string destinationFolder)
+        => throw new McpException("Failed to move email");
+
+    [SysDescription("Lists files. Throws a plain exception in this test double.")]
+    private static string CrashingListFiles([SysDescription("Folder to list")] string folder)
+        => throw new InvalidOperationException("provider exploded");
+
+    [TestMethod]
+    public async Task InvokeAsync_McpExceptionOnSchemaValidArguments_GetsNoHint()
+    {
+        // Issue #50: calendar-mcp move_email, three string arguments all declared as strings, failed
+        // on a provider bug. The SDK reports that as "An error occurred invoking 'move_email':
+        // Failed to move email", which must come back unchanged, not re-described as a type error.
+        var tool = McpServerTool.Create(MoveEmail, new McpServerToolCreateOptions { Name = "move_email" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(DownstreamName, "move_email",
+            """{"accountId":"work","emailId":"AAMk1","destinationFolder":"Archive"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "Failed to move email");
+        Assert.IsFalse(text.Contains("Argument mismatch"), text);
+        Assert.IsFalse(text.Contains("declared"), text);
+        Assert.AreEqual(1, result.Content.Count, "Nothing may be appended to a runtime error.");
+    }
+
+    [TestMethod]
+    public async Task InvokeAsync_PlainExceptionOnSchemaValidArguments_GetsHedgedNoteOnly()
+    {
+        // The SDK sanitizes a plain exception to the same bare text it uses for a binding failure,
+        // so the proxy cannot tell them apart: it may attach the schema but must not claim a cause.
+        var tool = McpServerTool.Create(CrashingListFiles, new McpServerToolCreateOptions { Name = "list_files" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "list_files", """{"folder":"/Documents"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "the downstream gave no detail");
+        StringAssert.Contains(text, "otherwise the failure is on the downstream's side");
+        Assert.IsFalse(text.Contains("Argument mismatch"), text);
+        Assert.IsFalse(text.Contains("declared as"), text);
+    }
+
+    [TestMethod]
+    public async Task InvokeAsync_ToolErrorMentioningValidation_GetsNoHint()
+    {
+        // The old heuristic matched the bare word "validation" anywhere in the error.
+        var tool = McpServerTool.Create(
+            ([SysDescription("Folder to list")] string folder) => new CallToolResult
+            {
+                IsError = true,
+                Content = [new TextContentBlock { Text = "Mailbox validation failed on the provider." }]
+            },
+            new McpServerToolCreateOptions { Name = "list_files" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "list_files", """{"folder":"/Documents"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        Assert.AreEqual("Mailbox validation failed on the provider.", TextOf(result));
+    }
+
+    [TestMethod]
+    public async Task InvokeAsync_OtherSdkRejectsArguments_AttachesSchemaWithoutTypeClaim()
+    {
+        // The TypeScript SDK's own validation text is positive evidence the arguments were rejected,
+        // but it does not say a value had the wrong type, so neither does the hint.
+        var tool = McpServerTool.Create(
+            ([SysDescription("Folder to list")] string folder) => new CallToolResult
+            {
+                IsError = true,
+                Content = [new TextContentBlock { Text = "MCP error -32602: Invalid arguments for tool list_files: folder must match pattern" }]
+            },
+            new McpServerToolCreateOptions { Name = "list_files" });
+        await using var harness = await CreateHarnessAsync(tool);
+
+        var result = await harness.Proxy.InvokeAsync(
+            DownstreamName, "list_files", """{"folder":"Documents"}""", TestTimeout);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "the downstream rejected a value");
+        StringAssert.Contains(text, "Re-invoke with arguments matching this input schema");
+        Assert.IsFalse(text.Contains("declared as"), text);
     }
 
     [TestMethod]

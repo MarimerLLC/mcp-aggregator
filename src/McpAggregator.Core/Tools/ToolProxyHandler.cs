@@ -71,12 +71,15 @@ public class ToolProxyHandler
 
     /// <summary>
     /// When a tool call comes back as an error, checks the supplied arguments against the
-    /// downstream tool's input schema. Returns a corrective message (listing the missing/unknown
-    /// keys and the full schema) when there is an actual argument mismatch, or when the keys all
-    /// match but the downstream's error reads like an argument-binding failure (a value of the
-    /// wrong type — a string where the schema wants an array is the classic small-model slip).
-    /// Genuine tool-side errors on schema-valid arguments are left untouched. Returns null when no
-    /// hint applies.
+    /// downstream tool's input schema. Returns a corrective message (the specific mismatch and the
+    /// full schema) only on positive evidence of an argument problem: missing or unknown keys, a
+    /// top-level value whose JSON type contradicts the schema (a string where the schema wants an
+    /// array is the classic small-model slip), or a downstream error that says it rejected the
+    /// arguments. The C# SDK's bare "An error occurred invoking 'x'." carries no detail at all, so
+    /// it gets a hedged note with the schema that does not claim a cause. Every other error on
+    /// schema-valid arguments — including "An error occurred invoking 'x': detail", which is a tool
+    /// throwing <c>McpException</c> at runtime (issue #50) — is left untouched. Returns null when
+    /// no hint applies.
     /// </summary>
     private async Task<string?> TryBuildArgumentHintAsync(
         string serverName,
@@ -109,23 +112,40 @@ public class ToolProxyHandler
                 ? providedKeys.Where(k => !propertyNames.Contains(k, StringComparer.Ordinal)).ToList()
                 : [];
 
+            var typeMismatches = FindTypeMismatches(schema, providedArgs);
+
             var keysMatch = missingRequired.Count == 0 && unknownKeys.Count == 0;
-            if (keysMatch && !LooksLikeBindingFailure(errorText))
+            var reportsBindingFailure = HasBindingFailureSignal(errorText);
+            var noDetail = !reportsBindingFailure && IsBareSdkInvocationError(errorText, toolName);
+            if (keysMatch && typeMismatches.Count == 0 && !reportsBindingFailure && !noDetail)
                 return null;
+
+            // With no evidence beyond a detail-free error, say so rather than asserting a cause.
+            var hedged = keysMatch && typeMismatches.Count == 0 && noDetail;
 
             var schemaText = JsonSerializer.Serialize(schema, SchemaHintJsonOptions);
 
             var sb = new StringBuilder();
-            sb.Append("Argument mismatch for tool '").Append(toolName).Append("' on '").Append(serverName).Append("'. ");
+            if (hedged)
+                sb.Append("Tool '").Append(toolName).Append("' on '").Append(serverName).Append("' failed and the downstream gave no detail. ");
+            else
+                sb.Append("Argument mismatch for tool '").Append(toolName).Append("' on '").Append(serverName).Append("'. ");
             if (missingRequired.Count > 0)
                 sb.Append("Missing required parameter(s): [").Append(string.Join(", ", missingRequired)).Append("]. ");
             if (unknownKeys.Count > 0)
                 sb.Append("Unrecognized argument key(s): [").Append(string.Join(", ", unknownKeys)).Append("]. ");
-            if (keysMatch)
-                sb.Append("Every key matched the schema, so a supplied value did not match its declared type (for example a string where an array is required). ");
+            foreach (var (name, declared, sent) in typeMismatches)
+                sb.Append("Parameter '").Append(name).Append("' is declared as ").Append(declared)
+                  .Append(" but you sent ").Append(sent).Append(". ");
+            if (keysMatch && typeMismatches.Count == 0)
+            {
+                sb.Append(hedged
+                    ? "Every key and top-level value type matched the schema, so if this is an argument problem it is in a nested value or a format (for example a date string); otherwise the failure is on the downstream's side. "
+                    : "Every key matched the schema; the downstream rejected a value (see its error above). ");
+            }
             if (providedKeys.Count > 0)
                 sb.Append("You sent: [").Append(string.Join(", ", providedKeys)).Append("]. ");
-            sb.Append("Re-invoke with arguments matching this input schema: ").Append(schemaText);
+            sb.Append(hedged ? "Input schema: " : "Re-invoke with arguments matching this input schema: ").Append(schemaText);
 
             return sb.ToString();
         }
@@ -179,15 +199,90 @@ public class ToolProxyHandler
     }
 
     /// <summary>
-    /// The C# SDK reports a downstream binding failure as "An error occurred invoking '{tool}'."
-    /// with the detail confined to the server log; other SDKs say "invalid arguments" or
-    /// "validation". None of them name the parameter, which is why the schema is attached.
+    /// Phrases other SDKs use when they reject a call's arguments against the schema: the
+    /// TypeScript SDK's "Invalid arguments for tool" (JSON-RPC -32602) and pydantic's "validation
+    /// error for" (Python/FastMCP). Kept deliberately narrow: a tool's own error that merely
+    /// mentions "invalid" or "validation" is not evidence of a binding failure (issue #50).
     /// </summary>
-    private static bool LooksLikeBindingFailure(string errorText)
-        => errorText.Contains("An error occurred invoking", StringComparison.OrdinalIgnoreCase)
-           || errorText.Contains("invalid argument", StringComparison.OrdinalIgnoreCase)
-           || errorText.Contains("invalid params", StringComparison.OrdinalIgnoreCase)
-           || errorText.Contains("validation", StringComparison.OrdinalIgnoreCase);
+    private static readonly string[] BindingFailureSignals =
+        ["Invalid arguments for tool", "-32602", "validation error for"];
+
+    private static bool HasBindingFailureSignal(string errorText)
+        => BindingFailureSignals.Any(s => errorText.Contains(s, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// True when the error is exactly the C# SDK's sanitized "An error occurred invoking '{tool}'."
+    /// with nothing after it. The SDK emits that for a binding failure and for any non-
+    /// <c>McpException</c> the tool throws alike, so it is ambiguous; a tool that throws
+    /// <c>McpException</c> gets "…'{tool}': {message}" instead, which is a runtime error.
+    /// </summary>
+    private static bool IsBareSdkInvocationError(string errorText, string toolName)
+        => string.Equals(errorText.Trim(), $"An error occurred invoking '{toolName}'.", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Compares each supplied top-level value's JSON type with the <c>type</c> its property
+    /// declares (a string, or an array such as <c>["string","null"]</c>). Values come through
+    /// <see cref="ConvertJsonElement"/>, so the runtime types are a closed set. Properties with no
+    /// <c>type</c> (<c>anyOf</c>, <c>$ref</c>, …), unknown keys and null values are skipped, and
+    /// nested values are not inspected: a reported mismatch is always a real one.
+    /// </summary>
+    internal static List<(string Name, string Declared, string Sent)> FindTypeMismatches(
+        JsonElement schema,
+        IReadOnlyDictionary<string, object?>? providedArgs)
+    {
+        var mismatches = new List<(string, string, string)>();
+        if (providedArgs is null
+            || !schema.TryGetProperty("properties", out var props)
+            || props.ValueKind != JsonValueKind.Object)
+            return mismatches;
+
+        foreach (var (name, value) in providedArgs)
+        {
+            if (value is null
+                || !props.TryGetProperty(name, out var property)
+                || property.ValueKind != JsonValueKind.Object
+                || !property.TryGetProperty("type", out var typeElement))
+                continue;
+
+            List<string> declared = typeElement.ValueKind switch
+            {
+                JsonValueKind.String => [typeElement.GetString()!],
+                JsonValueKind.Array => typeElement.EnumerateArray()
+                    .Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => e.GetString()!)
+                    .ToList(),
+                _ => [],
+            };
+
+            var sent = JsonTypeOf(value);
+            if (declared.Count == 0 || sent is null || IsCompatible(declared, sent, value))
+                continue;
+
+            mismatches.Add((name, string.Join(" or ", declared), WithArticle(sent)));
+        }
+
+        return mismatches;
+    }
+
+    private static string? JsonTypeOf(object value) => value switch
+    {
+        string => "string",
+        bool => "boolean",
+        long or int => "integer",
+        double or float or decimal => "number",
+        System.Collections.IDictionary => "object",
+        System.Collections.IEnumerable => "array",
+        _ => null,
+    };
+
+    private static bool IsCompatible(List<string> declared, string sent, object value)
+        => declared.Contains(sent, StringComparer.Ordinal)
+           || (sent == "integer" && declared.Contains("number", StringComparer.Ordinal))
+           || (sent == "number" && declared.Contains("integer", StringComparer.Ordinal)
+               && value is double d && d == Math.Floor(d));
+
+    private static string WithArticle(string jsonType)
+        => jsonType is "array" or "integer" or "object" ? "an " + jsonType : "a " + jsonType;
 
     internal static object? ConvertJsonElement(JsonElement element)
     {
