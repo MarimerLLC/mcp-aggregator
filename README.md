@@ -33,7 +33,7 @@ The server starts on `http://localhost:8080` and exposes:
 
 | Endpoint | Description |
 |----------|-------------|
-| `/mcp` | MCP over HTTP/SSE transport |
+| `/` | MCP over HTTP/SSE transport |
 | `/api/services` | REST API for consumers |
 | `/api/admin/services` | REST API for administration |
 | `/scalar` | Interactive API documentation |
@@ -451,11 +451,48 @@ Or point to the HTTP server if it's already running:
 {
   "mcpServers": {
     "aggregator": {
-      "url": "http://localhost:8080/mcp"
+      "url": "http://localhost:8080/"
     }
   }
 }
 ```
+
+The MCP endpoint is mapped at the server root (`/`), not `/mcp`.
+
+### Claude Desktop Integration
+
+Claude Desktop only launches stdio MCP servers from its config file, so a remote aggregator (e.g. the Kubernetes deployment behind Tailscale) is bridged with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote). Custom connectors under Settings → Connectors won't work for a tailnet-only URL, because those are reached from Anthropic's cloud rather than your machine.
+
+Install `mcp-remote` globally (requires Node.js):
+
+```bash
+npm i -g mcp-remote
+```
+
+Then add the aggregator to `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "mcp-aggregator": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "C:\\Users\\<you>\\AppData\\Roaming\\npm\\node_modules\\mcp-remote\\dist\\proxy.js",
+        "https://mcp-aggregator.<tailnet>.ts.net"
+      ]
+    }
+  }
+}
+```
+
+On macOS/Linux, `"command": "mcp-remote"` with just the URL in `args` works. Use `npm prefix -g` to find the global `node_modules` location.
+
+Notes:
+- **Use a global install, not `npx -y mcp-remote`.** `npx` resolves the package on every launch, which can take ~30s — longer than Claude Desktop's startup wait, so the tools appear late or not at all in chats opened in the meantime. The global install connects in ~2s. Run `npm update -g mcp-remote` occasionally since it no longer self-updates.
+- **Invoke `node.exe` directly on Windows** rather than the `mcp-remote.cmd` shim, which Claude Desktop may not launch without a shell.
+- **Restart Claude Desktop** after editing the config. The server appears under Settings → Developer, not Connectors.
+- **`Failed to open SSE stream: Bad Request` in the log is harmless.** A server running stateless (`Http:SessionMode` = `Stateless`, or builds before sessions for `initialize` clients were added) rejects the optional GET stream; tool calls still work, but `list_changed` notifications aren't delivered.
+- Logs are in `%LOCALAPPDATA%\Claude\Logs\mcp-server-mcp-aggregator.log` (current Windows builds) or `~/Library/Logs/Claude/` on macOS.
 
 ## Project Structure
 
