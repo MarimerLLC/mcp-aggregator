@@ -67,24 +67,44 @@ public class SkillStore
             await using var stream = File.OpenRead(path);
             return await JsonSerializer.DeserializeAsync<SkillBaseline>(stream, BaselineJson, ct);
         }
-        catch (Exception ex) when (ex is JsonException or IOException)
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
             _logger.LogWarning(ex, "Ignoring unreadable skill baseline for '{Server}'", serverName);
             return null;
         }
     }
 
-    /// <summary>Writes the baseline atomically (temp file + rename), like the registry.</summary>
+    /// <summary>
+    /// Writes the baseline atomically (temp file + rename), like the registry. Writes to one
+    /// baseline are serialized (on Windows two concurrent renames onto the same file fail), and each
+    /// stages in its own temp file, so two saves of the same skill never touch each other's file;
+    /// the last one wins.
+    /// </summary>
     public async Task SetBaselineAsync(string serverName, SkillBaseline baseline, CancellationToken ct = default)
     {
         var path = GetBaselinePath(serverName);
-        var temp = path + ".tmp";
-        await using (var stream = File.Create(temp))
+        var gate = BaselineWriteLocks.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        var temp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
         {
-            await JsonSerializer.SerializeAsync(stream, baseline, BaselineJson, ct);
+            await using (var stream = File.Create(temp))
+            {
+                await JsonSerializer.SerializeAsync(stream, baseline, BaselineJson, ct);
+            }
+            File.Move(temp, path, overwrite: true);
         }
-        File.Move(temp, path, overwrite: true);
+        finally
+        {
+            if (File.Exists(temp))
+                File.Delete(temp);
+            gate.Release();
+        }
     }
+
+    /// <summary>Keyed by full path so every <see cref="SkillStore"/> on the same directory shares them.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> BaselineWriteLocks =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public bool DeleteBaseline(string serverName)
     {

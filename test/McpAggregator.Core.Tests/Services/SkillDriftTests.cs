@@ -120,6 +120,36 @@ public class SkillDriftTests
     }
 
     [TestMethod]
+    public void Compute_RequiredNameOutsideProperties_IsOtherSchemaChange()
+    {
+        // PR #60 review: `required` may name something absent from `properties`. Changing it must
+        // not leave the tool reported unchanged.
+        var before = new List<ToolDetail> { Tool("t", "T", """{"type":"object"}""") };
+        var after = new List<ToolDetail> { Tool("t", "T", """{"type":"object","required":["token"]}""") };
+
+        var drift = SkillDriftCalculator.Compute(Server(), Baseline(before), after, []);
+
+        Assert.IsTrue(drift.ToolsChanged.Single().OtherSchemaChanges);
+        Assert.IsFalse(drift.CatalogUnchanged);
+        Assert.IsFalse(SkillNotice.Render(drift).Contains("only the version differs"));
+    }
+
+    [TestMethod]
+    public void Compute_RequiredOnANewParameter_IsNotAlsoOtherSchemaChange()
+    {
+        var before = new List<ToolDetail> { Tool("t", "T", """{"type":"object","properties":{}}""") };
+        var after = new List<ToolDetail>
+        {
+            Tool("t", "T", """{"type":"object","properties":{"token":{"type":"string"}},"required":["token"]}"""),
+        };
+
+        var change = SkillDriftCalculator.Compute(Server(), Baseline(before), after, []).ToolsChanged.Single();
+
+        CollectionAssert.AreEqual(new[] { "token" }, change.ParametersAdded);
+        Assert.IsFalse(change.OtherSchemaChanges);
+    }
+
+    [TestMethod]
     public void Compute_PromptArgumentChanges_AreClassified()
     {
         var before = new List<PromptDetail> { Prompt("daily_briefing", "Brief me.", ("date", false)), Prompt("old", "O") };

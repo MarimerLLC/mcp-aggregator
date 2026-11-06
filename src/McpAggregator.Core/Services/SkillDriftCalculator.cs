@@ -117,7 +117,24 @@ public static class SkillDriftCalculator
             .Order(StringComparer.Ordinal)
             .ToList();
 
-        change.OtherSchemaChanges = !string.Equals(Remainder(b), Remainder(a), StringComparison.Ordinal);
+        // `required` may name something absent from `properties` (valid JSON Schema). Membership
+        // changes for those names are not a per-parameter change, so they count here.
+        var anyProperty = oldProps.Keys.Union(newProps.Keys).ToHashSet(StringComparer.Ordinal);
+        var requiredOutsideProperties = !oldRequired.Where(r => !anyProperty.Contains(r))
+            .ToHashSet(StringComparer.Ordinal)
+            .SetEquals(newRequired.Where(r => !anyProperty.Contains(r)));
+
+        change.OtherSchemaChanges = requiredOutsideProperties
+            || !string.Equals(Remainder(b), Remainder(a), StringComparison.Ordinal);
+
+        // The canonical schemas differ, so something changed. If no rule above classified it, say so
+        // rather than reporting the tool unchanged (which would also make the notice claim that only
+        // the version differs).
+        if (change.ParametersAdded.Count == 0 && change.ParametersRemoved.Count == 0
+            && change.ParametersChanged.Count == 0)
+        {
+            change.OtherSchemaChanges = true;
+        }
     }
 
     private static string Canonical(JsonElement? schema)
