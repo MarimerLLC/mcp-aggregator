@@ -57,12 +57,16 @@ public static partial class SkillDraftValidator
                     problems.Add($"New prompt `{name}` is neither documented nor listed as omitted.");
         }
 
+        // Exact set membership, both sides extracted and normalized the same way: a substring test
+        // would let https://example.com pass because https://example.com.au/guide is allowed.
         var allowed = current + "\n" + allowedSourceText;
-        foreach (var url in UrlPattern().Matches(draft).Select(m => m.Value.TrimEnd('.', ',', ';', ':', ')', ']', '*', '_')).Distinct())
-            if (!allowed.Contains(url, StringComparison.Ordinal))
+        var allowedUrls = Urls(allowed).ToHashSet(StringComparer.Ordinal);
+        foreach (var url in Urls(draft).Distinct(StringComparer.Ordinal))
+            if (!allowedUrls.Contains(url))
                 problems.Add($"The draft introduces a URL that is not in the current document or the server's catalog: {url}");
-        foreach (var email in EmailPattern().Matches(draft).Select(m => m.Value).Distinct(StringComparer.OrdinalIgnoreCase))
-            if (!allowed.Contains(email, StringComparison.OrdinalIgnoreCase))
+        var allowedEmails = Emails(allowed).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var email in Emails(draft).Distinct(StringComparer.OrdinalIgnoreCase))
+            if (!allowedEmails.Contains(email))
                 problems.Add($"The draft introduces an email address that is not in the current document or the server's catalog: {email}");
 
         if (draft.Contains(SkillNotice.StartMarker, StringComparison.Ordinal))
@@ -71,21 +75,41 @@ public static partial class SkillDraftValidator
         return problems;
     }
 
+    private static IEnumerable<string> Urls(string text)
+        => UrlPattern().Matches(text).Select(m => m.Value.TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '*', '_'));
+
+    private static IEnumerable<string> Emails(string text)
+        => EmailPattern().Matches(text).Select(m => m.Value);
+
     /// <summary>
-    /// Whether <paramref name="text"/> names <paramref name="name"/>: in backticks always; as a bare
-    /// word only when the name contains <c>_</c>, <c>-</c> or <c>.</c>, so a removed tool called
-    /// <c>search</c> is not "found" in ordinary prose. The aggregator's wrapper form
-    /// (<c>{server}__{name}</c>) counts as a mention.
+    /// Whether <paramref name="text"/> names <paramref name="name"/>. Names are compared as whole
+    /// identifiers (letters, digits, <c>_</c>, <c>-</c>, <c>.</c>; a trailing <c>.</c> or <c>-</c> is
+    /// sentence punctuation), so <c>foo-bar-v2</c> is not a mention of <c>foo-bar</c>. A name counts
+    /// inside a code span, and as the aggregator's wrapper form <c>{server}__{name}</c> anywhere. A
+    /// bare identifier in prose counts only when the name contains <c>_</c>, <c>-</c> or <c>.</c>, so
+    /// a removed tool called <c>search</c> is not "found" in ordinary prose.
     /// </summary>
     internal static bool Mentions(string text, string name)
     {
-        if (text.Contains('`' + name + '`', StringComparison.Ordinal)
-            || text.Contains("__" + name + '`', StringComparison.Ordinal))
-            return true;
-        if (name.IndexOfAny(['_', '-', '.']) < 0)
-            return false;
-        return Regex.IsMatch(text, $"(?:(?<![A-Za-z0-9_])|(?<=__)){Regex.Escape(name)}(?![A-Za-z0-9_])");
+        foreach (Match span in CodeSpanPattern().Matches(text))
+            if (Identifiers(span.Groups[1].Value).Any(id => id == name || IsWrapperOf(id, name)))
+                return true;
+
+        var plainWord = name.IndexOfAny(['_', '-', '.']) < 0;
+        return Identifiers(text).Any(id => IsWrapperOf(id, name) || (!plainWord && id == name));
     }
+
+    private static bool IsWrapperOf(string identifier, string name)
+        => identifier.Length > name.Length + 2 && identifier.EndsWith("__" + name, StringComparison.Ordinal);
+
+    private static IEnumerable<string> Identifiers(string text)
+        => IdentifierPattern().Matches(text).Select(m => m.Value.TrimEnd('.', '-'));
+
+    [GeneratedRegex(@"[A-Za-z0-9_.\-]+")]
+    private static partial Regex IdentifierPattern();
+
+    [GeneratedRegex(@"`([^`\n]+)`")]
+    private static partial Regex CodeSpanPattern();
 
     [GeneratedRegex(@"https?://[^\s<>()\[\]`""']+", RegexOptions.IgnoreCase)]
     private static partial Regex UrlPattern();

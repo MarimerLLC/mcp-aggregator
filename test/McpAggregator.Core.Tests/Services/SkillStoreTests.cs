@@ -242,4 +242,37 @@ public class SkillStoreTests
         Assert.AreEqual(0, (await store.ListHistoryAsync("svc")).Count);
         Assert.IsNull(await store.GetDraftAsync("svc"));
     }
+
+    [TestMethod]
+    public async Task SetAsync_ConcurrentSaves_ArchiveEveryReplacedVersion()
+    {
+        // PR #61 review: two saves must not both archive the same predecessor and lose the one in between.
+        var store = CreateStore(historyLimit: 50);
+        await store.SetAsync("svc", "v0");
+
+        await Task.WhenAll(Enumerable.Range(1, 10).Select(i => Task.Run(() => store.SetAsync("svc", $"v{i}"))));
+
+        var history = await store.ListHistoryAsync("svc");
+        var archived = new List<string>();
+        foreach (var entry in history)
+            archived.Add((await store.GetHistoryAsync("svc", entry.Version))!.Value.Markdown);
+        var current = await store.GetAsync("svc");
+        CollectionAssert.AreEquivalent(
+            Enumerable.Range(0, 11).Select(i => $"v{i}").Where(v => v != current).ToList(), archived,
+            "Every version but the current one must be in history exactly once.");
+    }
+
+    [TestMethod]
+    public async Task SetIfUnchangedAsync_RefusesWhenTheDocumentChanged()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "original");
+        var hash = SkillStore.ContentHash("original");
+        await store.SetAsync("svc", "someone else's edit");
+
+        Assert.IsFalse(await store.SetIfUnchangedAsync("svc", hash, "draft"));
+        Assert.AreEqual("someone else's edit", await store.GetAsync("svc"));
+        Assert.IsTrue(await store.SetIfUnchangedAsync("svc", SkillStore.ContentHash("someone else's edit"), "draft"));
+        Assert.AreEqual("draft", await store.GetAsync("svc"));
+    }
 }

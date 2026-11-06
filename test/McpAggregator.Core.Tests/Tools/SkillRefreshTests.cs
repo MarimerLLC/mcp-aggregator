@@ -234,6 +234,81 @@ public class SkillRefreshTests
     }
 
     [TestMethod]
+    public async Task EditDuringGeneration_IsKeptAndNothingIsPublished()
+    {
+        // PR #61 review: an update_skill that lands while the model works must not be overwritten.
+        await using var rig = await CreateAsync();
+        UpgradeDownstream(rig.Harness);
+        const string handEdit = "# Adjutant Skill Guide\n\nEdited by hand while the model was busy.\n";
+        rig.Model.Respond = _ =>
+        {
+            rig.Skills.SetAsync(Server, handEdit).GetAwaiter().GetResult();
+            return Revised;
+        };
+
+        var result = await RefreshAsync(rig, apply: true);
+
+        Assert.AreEqual("conflict", result.Status, result.Message);
+        Assert.AreEqual(handEdit, await rig.Skills.GetAsync(Server, TestTimeout));
+        Assert.IsNull(await rig.Skills.GetDraftAsync(Server, TestTimeout), "The obsolete draft is dropped.");
+    }
+
+    [TestMethod]
+    public async Task StoredDraft_CatalogChangedWithoutVersionBump_IsNotReused()
+    {
+        // PR #61 review: same document, same version, different catalog.
+        await using var rig = await CreateAsync();
+        UpgradeDownstream(rig.Harness);
+        await RefreshAsync(rig);
+        rig.Harness.DownstreamTools[Server].Add(Tool(ListAccounts, "list_accounts"));
+        rig.Harness.Index.InvalidateCache(Server);
+
+        var result = await RefreshAsync(rig, apply: true);
+
+        Assert.IsFalse(result.FromStoredDraft);
+        Assert.AreEqual(2, rig.Model.Requests.Count, "A new draft is generated for the new catalog.");
+    }
+
+    [TestMethod]
+    public async Task Published_IsJudgedAgainstTheCatalogItWasWrittenFrom()
+    {
+        // PR #61 review: if the catalog changes while the model works, the published document must not
+        // be recorded as fresh against the newer catalog.
+        await using var rig = await CreateAsync();
+        UpgradeDownstream(rig.Harness);
+        rig.Model.Respond = _ =>
+        {
+            rig.Harness.DownstreamTools[Server].Add(Tool(ListAccounts, "list_accounts"));
+            rig.Harness.Index.InvalidateCache(Server);
+            return Revised;
+        };
+
+        var result = await RefreshAsync(rig, apply: true);
+
+        Assert.AreEqual("applied", result.Status, result.Message);
+        var details = await rig.Harness.Index.GetDetailsAsync(Server, TestTimeout);
+        Assert.AreEqual("stale", details.SkillFreshness);
+        CollectionAssert.AreEqual(new[] { "list_accounts" }, details.SkillDrift!.ToolsAdded);
+    }
+
+    [TestMethod]
+    public async Task DraftOverTheSizeLimitWithProvenance_FailsValidation()
+    {
+        // PR #61 review: content checks run without the provenance line, but the saved text includes it.
+        await using var rig = await CreateAsync();
+        UpgradeDownstream(rig.Harness);
+        var body = Revised + new string('x', SkillStore.MaxSkillSize - Revised.Length - 10);
+        rig.Model.Respond = _ => body;
+
+        var proposed = await RefreshAsync(rig);
+        var applied = await RefreshAsync(rig, apply: true);
+
+        Assert.IsFalse(proposed.ValidationPassed);
+        StringAssert.Contains(string.Join(" | ", proposed.Problems), "with its provenance line");
+        Assert.AreEqual("rejected", applied.Status);
+    }
+
+    [TestMethod]
     public async Task VersionOnlyChange_RebaselinesWithoutTheModel()
     {
         await using var rig = await CreateAsync();

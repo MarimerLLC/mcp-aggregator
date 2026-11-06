@@ -113,6 +113,30 @@ public class SkillRevisionUnitTests
     }
 
     [TestMethod]
+    public void Validate_UrlAndEmailAllowlist_IsExactNotSubstring()
+    {
+        // PR #61 review: an allowed https://example.com.au/guide must not admit https://example.com,
+        // nor help@known.example admit elp@known.example.
+        var problems = SkillDraftValidator.Validate(
+            "# G\n", "# G\nSee https://example.com and write to elp@known.example.\n",
+            Drift(), [], "Guide: https://example.com.au/guide, help: help@known.example", Options);
+
+        Assert.AreEqual(2, problems.Count, string.Join(" | ", problems));
+    }
+
+    [TestMethod]
+    public void Mentions_ComparesWholeIdentifiers()
+    {
+        // PR #61 review: a bare wrapper names a plain-word tool, and internal hyphens/dots are not boundaries.
+        Assert.IsTrue(SkillDraftValidator.Mentions("call adjutant__search with a query", "search"));
+        Assert.IsFalse(SkillDraftValidator.Mentions("use foo-bar-v2 instead", "foo-bar"));
+        Assert.IsFalse(SkillDraftValidator.Mentions("use config.v2 here", "config"));
+        Assert.IsTrue(SkillDraftValidator.Mentions("Then call foo-bar.", "foo-bar"), "Sentence punctuation is not part of the name.");
+        Assert.IsTrue(SkillDraftValidator.Mentions("Call `search(query)` first.", "search"));
+        Assert.IsFalse(SkillDraftValidator.Mentions("Call `search_all` first.", "search"));
+    }
+
+    [TestMethod]
     public void Validate_LengthOutsideBounds_IsAProblem()
     {
         var current = "# G\n" + new string('x', 1000) + "\n";

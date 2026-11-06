@@ -52,22 +52,54 @@ public class SkillStore
     /// first, so every save — by hand, by <c>refresh_skill</c> or by <c>restore_skill</c> — can be
     /// rolled back. Saving identical text keeps no history entry.
     /// </summary>
-    public async Task SetAsync(string serverName, string markdown, CancellationToken ct = default)
+    public Task SetAsync(string serverName, string markdown, CancellationToken ct = default)
+        => SetCoreAsync(serverName, markdown, expectedSha256: null, ct);
+
+    /// <summary>
+    /// Saves <paramref name="markdown"/> only if the current document still hashes to
+    /// <paramref name="expectedSha256"/> (<see cref="ContentHash"/>); returns false, changing nothing,
+    /// when someone saved in between. Used to publish a <c>refresh_skill</c> draft without
+    /// overwriting an edit made while the model was working.
+    /// </summary>
+    public Task<bool> SetIfUnchangedAsync(string serverName, string expectedSha256, string markdown, CancellationToken ct = default)
+        => SetCoreAsync(serverName, markdown, expectedSha256, ct);
+
+    /// <summary>
+    /// Reading the previous text, archiving it and writing the replacement happen under one
+    /// per-document lock, so two concurrent saves can't both archive the same predecessor and lose
+    /// the version in between, and a conditional save compares against what it actually replaces.
+    /// </summary>
+    private async Task<bool> SetCoreAsync(string serverName, string markdown, string? expectedSha256, CancellationToken ct)
     {
         if (markdown.Length > MaxSkillSizeBytes)
             throw new AggregatorException($"Skill document exceeds maximum size of {MaxSkillSizeBytes} bytes.");
 
         var path = GetPath(serverName);
-        if (File.Exists(path))
+        var gate = LockFor(path);
+        await gate.WaitAsync(ct);
+        try
         {
-            var previous = await File.ReadAllTextAsync(path, ct);
-            if (!string.Equals(previous, markdown, StringComparison.Ordinal))
+            var previous = File.Exists(path) ? await File.ReadAllTextAsync(path, ct) : null;
+            if (expectedSha256 is not null && (previous is null || ContentHash(previous) != expectedSha256))
+                return false;
+
+            if (previous is not null && !string.Equals(previous, markdown, StringComparison.Ordinal))
                 await ArchiveAsync(serverName, previous, ct);
+
+            await File.WriteAllTextAsync(path, markdown, ct);
+        }
+        finally
+        {
+            gate.Release();
         }
 
-        await File.WriteAllTextAsync(path, markdown, ct);
         _logger.LogInformation("Saved skill document for '{Server}'", serverName);
+        return true;
     }
+
+    /// <summary>SHA-256 of a document's text, lowercase hex: the identity a draft records for what it revises.</summary>
+    public static string ContentHash(string text)
+        => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
 
     /// <summary>Deletes the document, its baseline, its history and any pending draft.</summary>
     public bool Delete(string serverName)
@@ -222,7 +254,7 @@ public class SkillStore
 
     private static async Task WriteJsonAtomicAsync<T>(string path, T value, CancellationToken ct)
     {
-        var gate = WriteLocks.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
+        var gate = LockFor(path);
         await gate.WaitAsync(ct);
         var temp = $"{path}.{Guid.NewGuid():N}.tmp";
         try
@@ -247,6 +279,9 @@ public class SkillStore
         File.Delete(path);
         return true;
     }
+
+    private static SemaphoreSlim LockFor(string path)
+        => WriteLocks.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
 
     /// <summary>Keyed by full path so every <see cref="SkillStore"/> on the same directory shares them.</summary>
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> WriteLocks =

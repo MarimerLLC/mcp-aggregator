@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -98,12 +97,22 @@ public sealed partial class SkillMaintainer
                 : Result("failed", $"'{serverName}' could not be read to record a baseline. {SkillSnapshot.NoBaselineNote}", drift);
         }
 
-        var currentHash = Sha256(current);
+        var currentHash = SkillStore.ContentHash(current);
+        var tools = await _toolIndex.GetToolsForServerAsync(serverName, ct);
+        var prompts = await _toolIndex.GetPromptsForServerAsync(serverName, ct);
+        var catalogFingerprint = SkillFingerprint.Compute(tools, prompts);
+        var instructionsHash = SkillStore.ContentHash(server.RemoteInstructions ?? string.Empty);
 
         if (apply && !regenerate)
         {
+            // Reused only while it still revises this document for this exact server state: the
+            // catalog and instructions can change without a version bump.
             var stored = await _skillStore.GetDraftAsync(serverName, ct);
-            if (stored is not null && stored.BasedOnSha256 == currentHash && stored.ServerVersion == server.RemoteVersion)
+            if (stored is not null
+                && stored.BasedOnSha256 == currentHash
+                && stored.ServerVersion == server.RemoteVersion
+                && stored.CatalogFingerprint == catalogFingerprint
+                && stored.InstructionsSha256 == instructionsHash)
             {
                 if (!stored.ValidationPassed)
                 {
@@ -112,7 +121,8 @@ public sealed partial class SkillMaintainer
                         "or call refresh_skill with regenerate: true for a new draft.", drift), stored, current);
                 }
 
-                await PublishAsync(serverName, stored.Markdown, ct);
+                if (!await PublishAsync(serverName, stored, ct))
+                    return Conflict(serverName, drift);
                 return WithDraft(Result("applied",
                     $"Published the reviewed draft for '{serverName}' (from {stored.CreatedAt:u}). The previous version is in history; restore_skill can bring it back.",
                     drift), stored, current, fromStored: true);
@@ -129,7 +139,7 @@ public sealed partial class SkillMaintainer
         SkillDraft draft;
         try
         {
-            draft = await GenerateAsync(server, current, currentHash, drift, ct);
+            draft = await GenerateAsync(server, current, currentHash, drift, tools, prompts, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -156,29 +166,51 @@ public sealed partial class SkillMaintainer
             return WithDraft(Result("rejected", "The new draft failed validation, so it was not published; see problems.", drift), draft, current);
         }
 
-        await PublishAsync(serverName, draft.Markdown, ct);
+        if (!await PublishAsync(serverName, draft, ct))
+            return Conflict(serverName, drift);
         return WithDraft(Result("applied",
             $"Published a revised skill document for '{serverName}'. The previous version is in history; restore_skill can bring it back.",
             drift), draft, current);
     }
 
-    private async Task PublishAsync(string serverName, string markdown, CancellationToken ct)
+    /// <summary>
+    /// Saves the draft only if the document is still the one it revises (checked atomically with the
+    /// write), then records the catalog the draft was written from as the baseline. Returns false,
+    /// changing nothing, when someone saved the document in the meantime.
+    /// </summary>
+    private async Task<bool> PublishAsync(string serverName, SkillDraft draft, CancellationToken ct)
     {
-        await _skillStore.SetAsync(serverName, markdown, ct);
+        if (!await _skillStore.SetIfUnchangedAsync(serverName, draft.BasedOnSha256, draft.Markdown, ct))
+        {
+            _skillStore.DeleteDraft(serverName);
+            _logger.LogInformation("Did not publish skill revision for '{Server}': the document changed meanwhile", serverName);
+            return false;
+        }
+
         await _registry.UpdateSkillFlagAsync(serverName, true, ct);
-        await SkillSnapshot.CaptureAsync(_registry, _toolIndex, serverName, ct);
+        if (draft.Baseline is not null)
+            await SkillSnapshot.ApplyBaselineAsync(_registry, _toolIndex, serverName, draft.Baseline, ct);
+        else
+            await SkillSnapshot.CaptureAsync(_registry, _toolIndex, serverName, ct);
         _skillStore.DeleteDraft(serverName);
         _logger.LogInformation("Published revised skill for '{Server}'", serverName);
+        return true;
     }
+
+    private static SkillRefreshResult Conflict(string serverName, SkillDrift drift)
+        => Result("conflict",
+            $"The skill document for '{serverName}' was saved by someone else while this revision was prepared, so nothing was published " +
+            "(their edit is kept). Call refresh_skill again for a draft of the current document.", drift);
 
     // ---------------------------------------------------------------- generation
 
     private async Task<SkillDraft> GenerateAsync(
-        RegisteredServer server, string current, string currentHash, SkillDrift drift, CancellationToken ct)
+        RegisteredServer server, string current, string currentHash, SkillDrift drift,
+        List<ToolDetail> tools, List<PromptDetail> prompts, CancellationToken ct)
     {
-        var tools = await _toolIndex.GetToolsForServerAsync(server.Name, ct);
-        var prompts = await _toolIndex.GetPromptsForServerAsync(server.Name, ct);
         var catalog = RenderCatalog(tools, prompts);
+        var generatedAt = DateTimeOffset.UtcNow;
+        var baseline = SkillBaseline.Capture(server, tools, prompts, generatedAt);
         var document = StripProvenance(current);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -200,12 +232,19 @@ public sealed partial class SkillMaintainer
             document, StripProvenance(markdown), drift, omittedNames,
             catalog + "\n" + (server.RemoteInstructions ?? string.Empty), _options);
 
+        // The content checks run without the provenance line; the size limit applies to what is saved.
+        if (markdown.Length > SkillStore.MaxSkillSize)
+            problems.Add($"The draft with its provenance line is {markdown.Length} characters; the limit is {SkillStore.MaxSkillSize}.");
+
         return new SkillDraft
         {
             Markdown = markdown,
             BasedOnSha256 = currentHash,
             ServerVersion = server.RemoteVersion,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CatalogFingerprint = SkillFingerprint.Compute(tools, prompts),
+            InstructionsSha256 = SkillStore.ContentHash(server.RemoteInstructions ?? string.Empty),
+            Baseline = baseline,
+            CreatedAt = generatedAt,
             Model = ModelName,
             ValidationPassed = problems.Count == 0,
             Problems = problems,
@@ -341,9 +380,6 @@ public sealed partial class SkillMaintainer
     private static partial Regex OmittedLine();
 
     // ---------------------------------------------------------------- helpers
-
-    private static string Sha256(string text)
-        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
     private static SkillRefreshResult Result(string status, string message, SkillDrift? drift = null)
         => new() { Status = status, Message = message, Drift = drift };

@@ -31,6 +31,22 @@ public class SkillDraft
     /// <summary>The server version the draft was written for.</summary>
     public string? ServerVersion { get; set; }
 
+    /// <summary>
+    /// <see cref="Services.SkillFingerprint"/> of the catalog the draft was written from. The catalog
+    /// can change without a version bump, so a stored draft is reused only while this still matches.
+    /// </summary>
+    public string? CatalogFingerprint { get; set; }
+
+    /// <summary><see cref="Services.SkillStore.ContentHash"/> of the server instructions the draft was written from.</summary>
+    public string? InstructionsSha256 { get; set; }
+
+    /// <summary>
+    /// The catalog the draft was written from, recorded as the baseline when it is published, so the
+    /// published document is judged against what it was actually written for, not a catalog that
+    /// changed while it waited.
+    /// </summary>
+    public SkillBaseline? Baseline { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
     public string? Model { get; set; }
     public bool ValidationPassed { get; set; }
@@ -44,7 +60,8 @@ public class SkillRefreshResult
     /// <summary>
     /// <c>proposed</c>, <c>applied</c>, <c>rejected</c> (validation failed, nothing saved),
     /// <c>version_only</c>, <c>rebaselined</c>, <c>fresh</c>, <c>unknown</c>, <c>no_skill</c>,
-    /// <c>unavailable</c> (no model configured) or <c>failed</c>.
+    /// <c>unavailable</c> (no model configured), <c>conflict</c> (the document was saved by someone else
+    /// while the revision was prepared; nothing published) or <c>failed</c>.
     /// </summary>
     public required string Status { get; set; }
 

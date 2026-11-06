@@ -155,27 +155,44 @@ review recommended". The text after the marker is replaced on the next revision.
 | `apply`, stored draft failed validation | `rejected` | nothing saved; `regenerate: true` asks again |
 | `apply`, no usable stored draft | `applied` / `rejected` | generate, validate, publish only if valid |
 | Model error or timeout | `failed` | nothing saved |
+| Document saved by someone else meanwhile | `conflict` | nothing published, their edit kept, draft dropped |
 
-A stored draft is "still current" while the document it revised is unchanged (SHA-256) and the
-server reports the same version. Publishing goes through the normal save path:
+A stored draft is "still current" only while all of these match what it was generated from:
 
-1. `SkillStore.SetAsync`, which archives the replaced version;
-2. the skill flag;
-3. `SkillSnapshot.CaptureAsync`, which records a new baseline;
+- the document it revised (SHA-256);
+- the server version;
+- the catalog fingerprint;
+- the server instructions (SHA-256).
 
-and then the draft is deleted.
+The catalog and instructions can change without a version bump.
+
+Publishing:
+
+1. `SkillStore.SetIfUnchangedAsync` compares the document's hash with the draft's
+   `BasedOnSha256` and writes, under the same per-document lock every save takes, so an edit made
+   while the model worked is never overwritten (`conflict`).
+2. The skill flag is set.
+3. The catalog the draft was **generated from** (stored in the draft) becomes the baseline
+   (`SkillSnapshot.ApplyBaselineAsync`). If the catalog changed meanwhile, the published document
+   reads stale rather than fresh against a catalog it never saw.
+4. The draft is deleted.
+
+`SkillStore.SetAsync` reads the previous text, archives it and writes the replacement under one
+per-document lock, so concurrent saves can't lose an intermediate version from history.
 
 ### Validation (`SkillDraftValidator`)
 
 Mechanical, never model-judged, because the model's inputs are untrusted. A draft fails when it:
 
-- still names a removed tool or prompt. Backticks always count; a bare word counts only for names
-  with `_`, `-` or `.`, so a removed tool called `search` isn't "found" in prose. The
-  `{server}__{name}` wrapper form counts too;
+- still names a removed tool or prompt. Names are compared as whole identifiers, so `foo-bar-v2`
+  isn't `foo-bar`. A name counts inside a code span, and in the `{server}__{name}` wrapper form
+  anywhere. A bare word counts only for names with `_`, `-` or `.`, so a removed tool called
+  `search` isn't "found" in prose;
 - leaves an added tool or prompt neither mentioned nor listed as omitted;
-- falls outside the length bounds or over the 256 KB limit;
+- falls outside the length bounds, or is over the 256 KB limit once the provenance line is added;
 - contains a URL or email address that isn't in the current document, the catalog or the
-  server's instructions;
+  server's instructions. Both sides are extracted and normalized the same way and compared as
+  exact sets, so an allowed `https://example.com.au/guide` doesn't admit `https://example.com`;
 - is empty.
 
 ### History and restore
