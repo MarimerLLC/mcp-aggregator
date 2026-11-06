@@ -1,5 +1,7 @@
 using McpAggregator.Core.Configuration;
+using System.Text.Json;
 using McpAggregator.Core.Exceptions;
+using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -39,6 +41,7 @@ public class SkillStore
 
     public bool Delete(string serverName)
     {
+        DeleteBaseline(serverName);
         var path = GetPath(serverName);
         if (!File.Exists(path)) return false;
         File.Delete(path);
@@ -48,6 +51,57 @@ public class SkillStore
 
     public bool Exists(string serverName) => File.Exists(GetPath(serverName));
 
+    /// <summary>
+    /// The catalog snapshot recorded with the skill (issue #56), or null when none was recorded
+    /// (skills saved before #56, or a capture that could not read the server). An unreadable file is
+    /// treated as absent and logged, so freshness falls back to the fingerprint check.
+    /// </summary>
+    public async Task<SkillBaseline?> GetBaselineAsync(string serverName, CancellationToken ct = default)
+    {
+        var path = GetBaselinePath(serverName);
+        if (!File.Exists(path))
+            return null;
+
+        try
+        {
+            await using var stream = File.OpenRead(path);
+            return await JsonSerializer.DeserializeAsync<SkillBaseline>(stream, BaselineJson, ct);
+        }
+        catch (Exception ex) when (ex is JsonException or IOException)
+        {
+            _logger.LogWarning(ex, "Ignoring unreadable skill baseline for '{Server}'", serverName);
+            return null;
+        }
+    }
+
+    /// <summary>Writes the baseline atomically (temp file + rename), like the registry.</summary>
+    public async Task SetBaselineAsync(string serverName, SkillBaseline baseline, CancellationToken ct = default)
+    {
+        var path = GetBaselinePath(serverName);
+        var temp = path + ".tmp";
+        await using (var stream = File.Create(temp))
+        {
+            await JsonSerializer.SerializeAsync(stream, baseline, BaselineJson, ct);
+        }
+        File.Move(temp, path, overwrite: true);
+    }
+
+    public bool DeleteBaseline(string serverName)
+    {
+        var path = GetBaselinePath(serverName);
+        if (!File.Exists(path)) return false;
+        File.Delete(path);
+        return true;
+    }
+
+    private static readonly JsonSerializerOptions BaselineJson = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+    };
+
     private string GetPath(string serverName) =>
         Path.Combine(_skillsDir, $"{serverName}.md");
+
+    private string GetBaselinePath(string serverName) =>
+        Path.Combine(_skillsDir, $"{serverName}.baseline.json");
 }

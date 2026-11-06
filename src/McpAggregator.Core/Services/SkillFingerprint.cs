@@ -85,7 +85,7 @@ public static class SkillFingerprint
     /// downstream that reorders properties between reconnects does not read as drift. A null schema
     /// yields an empty string, which is distinct from <c>{}</c>.
     /// </summary>
-    private static string CanonicalJson(object? schema)
+    internal static string CanonicalJson(object? schema)
     {
         if (schema is null)
             return string.Empty;

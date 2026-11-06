@@ -261,6 +261,12 @@ Use `update_skill(serverName, markdown)` to set or improve any server's skill do
 
 Each update replaces the full document, so fetch the current content with `get_service_skill` first, then merge your improvements. The goal is that the next session using this server benefits from what you learned.
 
+#### Stale skills
+
+Saving a skill records the server's version, instructions, tools and prompts at that moment. When the server later changes, `list_services` and `get_service_details` report `skillFreshness: "stale"`. `get_service_details` also includes `skillDrift`: tools and prompts added, removed or changed, which parameters, and whether the version or instructions changed.
+
+`get_service_skill` then starts the document with a quoted notice between `<!-- aggregator:skill-notice -->` markers, listing what changed. Where the document and the live schemas disagree, follow the schemas. A stale skill is also a good moment to fix the document: update the parts the changes affect and save it with `update_skill`. You can save the text exactly as `get_service_skill` returned it; the notice is stripped on save, and saving records a new baseline.
+
 ### Regenerating Summaries
 
 Use `regenerate_summary` to refresh a server's AI-generated summary (the description shown in `list_services`). This is rarely needed — summaries are generated automatically at registration. Use it if a server's tools have changed significantly or if the original summary was inaccurate.

@@ -151,7 +151,8 @@ public class ToolIndex
             index.RemoteName = server.RemoteName;
             index.RemoteTitle = server.RemoteTitle;
             index.RemoteVersion = server.RemoteVersion;
-            index.SkillFreshness = ComputeFreshness(server, tools, prompts);
+            var baseline = server.HasSkillDocument ? await _skillStore.GetBaselineAsync(server.Name, ct) : null;
+            index.SkillFreshness = ComputeFreshness(server, baseline, tools, prompts);
 
             results.Add(index);
         }
@@ -163,10 +164,12 @@ public class ToolIndex
     /// <c>null</c> without a skill document; <c>unknown</c> when no baseline was recorded or the
     /// current tools or prompts could not be read; <c>stale</c> when the recorded version (if one
     /// was recorded) differs from the server's current version or the recorded fingerprint no longer
-    /// matches (see <see cref="SkillFingerprint"/>); otherwise <c>fresh</c>.
+    /// matches (see <see cref="SkillFingerprint"/>), or — when a <see cref="SkillBaseline"/> was
+    /// recorded (issue #56) — the server's instructions differ from it; otherwise <c>fresh</c>.
     /// </summary>
     private static string? ComputeFreshness(
         RegisteredServer server,
+        SkillBaseline? baseline,
         IReadOnlyList<ToolDetail>? currentTools,
         IReadOnlyList<PromptDetail>? currentPrompts)
     {
@@ -185,9 +188,78 @@ public class ToolIndex
             return "stale";
         }
 
+        if (baseline is not null
+            && SkillDriftCalculator.InstructionsDiffer(baseline.RemoteInstructions, server.RemoteInstructions))
+        {
+            return "stale";
+        }
+
         return SkillFingerprint.Matches(server.SkillRecordedFingerprint, currentTools, currentPrompts)
             ? "fresh"
             : "stale";
+    }
+
+    /// <summary>
+    /// Freshness plus, when stale, what drifted (issue #56). <paramref name="tools"/> or
+    /// <paramref name="prompts"/> null means they could not be read: freshness is then
+    /// <c>unknown</c> and there is no drift.
+    /// </summary>
+    private async Task<(string? Freshness, SkillDrift? Drift)> SkillStatusAsync(
+        RegisteredServer server,
+        List<ToolDetail>? tools,
+        List<PromptDetail>? prompts,
+        CancellationToken ct)
+    {
+        if (!server.HasSkillDocument)
+            return (null, null);
+
+        var baseline = await _skillStore.GetBaselineAsync(server.Name, ct);
+        var freshness = ComputeFreshness(server, baseline, tools, prompts);
+        var drift = freshness == "stale" && tools is not null && prompts is not null
+            ? SkillDriftCalculator.Compute(server, baseline, tools, prompts)
+            : null;
+        return (freshness, drift);
+    }
+
+    /// <summary>
+    /// The skill freshness of one downstream and, when stale, its drift — what
+    /// <c>get_service_skill</c> needs for its notice, without fetching resources. Throws like
+    /// <see cref="GetToolsForServerAsync"/> when the server cannot be read.
+    /// </summary>
+    public async Task<(string? Freshness, SkillDrift? Drift)> GetSkillStatusAsync(
+        string serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var server = _registry.Get(serverName);
+        if (!server.HasSkillDocument || !server.Enabled)
+            return (null, null);
+
+        var tools = await GetToolsForServerAsync(serverName, ct);
+        List<PromptDetail>? prompts = null;
+        try
+        {
+            prompts = await GetPromptsForServerAsync(serverName, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Failed to get prompts for '{Server}'; skill freshness is unknown", serverName);
+        }
+
+        return await SkillStatusAsync(server, tools, prompts, ct);
+    }
+
+    /// <summary>
+    /// Records (or, with null, removes) the catalog snapshot a skill was written against. Called
+    /// by <see cref="SkillSnapshot.CaptureAsync"/>.
+    /// </summary>
+    public Task SaveSkillBaselineAsync(string serverName, SkillBaseline? baseline, CancellationToken ct = default)
+    {
+        if (baseline is null)
+        {
+            _skillStore.DeleteBaseline(serverName);
+            return Task.CompletedTask;
+        }
+        return _skillStore.SetBaselineAsync(serverName, baseline, ct);
     }
 
     /// <summary><see cref="ServiceIndex.Id"/> of the aggregator's own entry; real downstreams carry hex ids.</summary>
@@ -321,6 +393,8 @@ public class ToolIndex
             _logger.LogDebug(ex, "Server '{Server}' does not expose resources", serverName);
         }
 
+        var (skillFreshness, skillDrift) = await SkillStatusAsync(server, tools, prompts, ct);
+
         return new ServiceDetails
         {
             Id = server.Id,
@@ -334,7 +408,8 @@ public class ToolIndex
             RemoteTitle = server.RemoteTitle,
             RemoteVersion = server.RemoteVersion,
             RemoteInstructions = server.RemoteInstructions,
-            SkillFreshness = ComputeFreshness(server, tools, prompts),
+            SkillFreshness = skillFreshness,
+            SkillDrift = skillDrift,
             SkillRecordedVersion = server.SkillRecordedVersion,
             SkillRecordedAt = server.SkillRecordedAt,
             Tools = tools,

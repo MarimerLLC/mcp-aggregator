@@ -246,7 +246,8 @@ public class AdminTools
     {
         await registry.EnsureLoadedAsync(ct);
         registry.Get(serverName); // Validate server exists
-        await skillStore.SetAsync(serverName, markdown, ct);
+        // A document fetched with get_service_skill may start with the stale notice; never store it.
+        await skillStore.SetAsync(serverName, SkillNotice.Strip(markdown), ct);
         await registry.UpdateSkillFlagAsync(serverName, true, ct);
         var baselineRecorded = await SkillSnapshot.CaptureAsync(registry, toolIndex, serverName, ct);
         return baselineRecorded
