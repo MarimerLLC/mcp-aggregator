@@ -1,5 +1,7 @@
-using McpAggregator.Core.Configuration;
+using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text.Json;
+using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
@@ -7,18 +9,34 @@ using Microsoft.Extensions.Options;
 
 namespace McpAggregator.Core.Services;
 
+/// <summary>
+/// Skill documents and what travels with them, all under the skills directory:
+/// <list type="bullet">
+/// <item><c>{name}.md</c> — the document;</item>
+/// <item><c>{name}.baseline.json</c> — the catalog it was written against (issue #56);</item>
+/// <item><c>history/{name}/{version}.md</c> (+ <c>.baseline.json</c>) — every replaced version (issue #57);</item>
+/// <item><c>drafts/{name}.json</c> — the pending <c>refresh_skill</c> proposal (issue #57).</item>
+/// </list>
+/// </summary>
 public class SkillStore
 {
     private readonly string _skillsDir;
+    private readonly int _historyLimit;
     private readonly ILogger<SkillStore> _logger;
     private const int MaxSkillSizeBytes = 256 * 1024; // 256KB
+
+    /// <summary>History version ids: UTC time of the save that replaced the version, sortable.</summary>
+    private const string VersionFormat = "yyyyMMdd'T'HHmmssfff'Z'";
 
     public SkillStore(IOptions<AggregatorOptions> options, ILogger<SkillStore> logger)
     {
         _skillsDir = options.Value.SkillsDirectoryPath;
+        _historyLimit = Math.Max(0, options.Value.SkillHistoryLimit);
         _logger = logger;
         Directory.CreateDirectory(_skillsDir);
     }
+
+    public static int MaxSkillSize => MaxSkillSizeBytes;
 
     public async Task<string?> GetAsync(string serverName, CancellationToken ct = default)
     {
@@ -29,19 +47,37 @@ public class SkillStore
         return await File.ReadAllTextAsync(path, ct);
     }
 
+    /// <summary>
+    /// Saves the document. The version it replaces (with its baseline, if any) is kept in history
+    /// first, so every save — by hand, by <c>refresh_skill</c> or by <c>restore_skill</c> — can be
+    /// rolled back. Saving identical text keeps no history entry.
+    /// </summary>
     public async Task SetAsync(string serverName, string markdown, CancellationToken ct = default)
     {
         if (markdown.Length > MaxSkillSizeBytes)
             throw new AggregatorException($"Skill document exceeds maximum size of {MaxSkillSizeBytes} bytes.");
 
         var path = GetPath(serverName);
+        if (File.Exists(path))
+        {
+            var previous = await File.ReadAllTextAsync(path, ct);
+            if (!string.Equals(previous, markdown, StringComparison.Ordinal))
+                await ArchiveAsync(serverName, previous, ct);
+        }
+
         await File.WriteAllTextAsync(path, markdown, ct);
         _logger.LogInformation("Saved skill document for '{Server}'", serverName);
     }
 
+    /// <summary>Deletes the document, its baseline, its history and any pending draft.</summary>
     public bool Delete(string serverName)
     {
         DeleteBaseline(serverName);
+        DeleteDraft(serverName);
+        var historyDir = GetHistoryDir(serverName);
+        if (Directory.Exists(historyDir))
+            Directory.Delete(historyDir, recursive: true);
+
         var path = GetPath(serverName);
         if (!File.Exists(path)) return false;
         File.Delete(path);
@@ -51,28 +87,15 @@ public class SkillStore
 
     public bool Exists(string serverName) => File.Exists(GetPath(serverName));
 
+    // ---------------------------------------------------------------- baseline (issue #56)
+
     /// <summary>
     /// The catalog snapshot recorded with the skill (issue #56), or null when none was recorded
     /// (skills saved before #56, or a capture that could not read the server). An unreadable file is
     /// treated as absent and logged, so freshness falls back to the fingerprint check.
     /// </summary>
-    public async Task<SkillBaseline?> GetBaselineAsync(string serverName, CancellationToken ct = default)
-    {
-        var path = GetBaselinePath(serverName);
-        if (!File.Exists(path))
-            return null;
-
-        try
-        {
-            await using var stream = File.OpenRead(path);
-            return await JsonSerializer.DeserializeAsync<SkillBaseline>(stream, BaselineJson, ct);
-        }
-        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
-        {
-            _logger.LogWarning(ex, "Ignoring unreadable skill baseline for '{Server}'", serverName);
-            return null;
-        }
-    }
+    public Task<SkillBaseline?> GetBaselineAsync(string serverName, CancellationToken ct = default)
+        => ReadJsonAsync<SkillBaseline>(GetBaselinePath(serverName), serverName, "skill baseline", ct);
 
     /// <summary>
     /// Writes the baseline atomically (temp file + rename), like the registry. Writes to one
@@ -80,17 +103,133 @@ public class SkillStore
     /// stages in its own temp file, so two saves of the same skill never touch each other's file;
     /// the last one wins.
     /// </summary>
-    public async Task SetBaselineAsync(string serverName, SkillBaseline baseline, CancellationToken ct = default)
+    public Task SetBaselineAsync(string serverName, SkillBaseline baseline, CancellationToken ct = default)
+        => WriteJsonAtomicAsync(GetBaselinePath(serverName), baseline, ct);
+
+    public bool DeleteBaseline(string serverName) => DeleteFile(GetBaselinePath(serverName));
+
+    // ---------------------------------------------------------------- history (issue #57)
+
+    /// <summary>Replaced versions of the document, newest first.</summary>
+    public async Task<List<SkillHistoryEntry>> ListHistoryAsync(string serverName, CancellationToken ct = default)
     {
-        var path = GetBaselinePath(serverName);
-        var gate = BaselineWriteLocks.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
+        var dir = GetHistoryDir(serverName);
+        if (!Directory.Exists(dir))
+            return [];
+
+        var entries = new List<SkillHistoryEntry>();
+        foreach (var file in Directory.GetFiles(dir, "*.md"))
+        {
+            var version = Path.GetFileNameWithoutExtension(file);
+            var baseline = await ReadJsonAsync<SkillBaseline>(
+                Path.Combine(dir, version + ".baseline.json"), serverName, "history baseline", ct);
+            entries.Add(new SkillHistoryEntry
+            {
+                Version = version,
+                ReplacedAt = ParseVersion(version),
+                Bytes = new FileInfo(file).Length,
+                HasBaseline = baseline is not null,
+                RecordedVersion = baseline?.RemoteVersion,
+                RecordedAt = baseline?.RecordedAt,
+            });
+        }
+
+        return entries.OrderByDescending(e => e.Version, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>One history version's document and baseline, or null when there is no such version.</summary>
+    public async Task<(string Markdown, SkillBaseline? Baseline)?> GetHistoryAsync(
+        string serverName, string version, CancellationToken ct = default)
+    {
+        // Version ids come from callers; never let one walk out of the history directory.
+        if (version.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || version.Contains(".."))
+            return null;
+
+        var dir = GetHistoryDir(serverName);
+        var path = Path.Combine(dir, version + ".md");
+        if (!File.Exists(path))
+            return null;
+
+        var markdown = await File.ReadAllTextAsync(path, ct);
+        var baseline = await ReadJsonAsync<SkillBaseline>(
+            Path.Combine(dir, version + ".baseline.json"), serverName, "history baseline", ct);
+        return (markdown, baseline);
+    }
+
+    private async Task ArchiveAsync(string serverName, string previous, CancellationToken ct)
+    {
+        if (_historyLimit == 0)
+            return;
+
+        var dir = GetHistoryDir(serverName);
+        Directory.CreateDirectory(dir);
+
+        var version = DateTimeOffset.UtcNow.ToString(VersionFormat, CultureInfo.InvariantCulture);
+        for (var n = 1; File.Exists(Path.Combine(dir, version + ".md")); n++)
+            version = DateTimeOffset.UtcNow.ToString(VersionFormat, CultureInfo.InvariantCulture) + "-" + n;
+
+        await File.WriteAllTextAsync(Path.Combine(dir, version + ".md"), previous, ct);
+        var baselinePath = GetBaselinePath(serverName);
+        if (File.Exists(baselinePath))
+            File.Copy(baselinePath, Path.Combine(dir, version + ".baseline.json"), overwrite: true);
+
+        foreach (var old in Directory.GetFiles(dir, "*.md")
+                     .Select(Path.GetFileNameWithoutExtension)
+                     .OrderByDescending(v => v, StringComparer.Ordinal)
+                     .Skip(_historyLimit))
+        {
+            DeleteFile(Path.Combine(dir, old + ".md"));
+            DeleteFile(Path.Combine(dir, old + ".baseline.json"));
+        }
+    }
+
+    private static DateTimeOffset? ParseVersion(string version)
+        => DateTimeOffset.TryParseExact(version.Split('-')[0], VersionFormat, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal, out var at) ? at : null;
+
+    // ---------------------------------------------------------------- drafts (issue #57)
+
+    public Task<SkillDraft?> GetDraftAsync(string serverName, CancellationToken ct = default)
+        => ReadJsonAsync<SkillDraft>(GetDraftPath(serverName), serverName, "skill draft", ct);
+
+    public Task SetDraftAsync(string serverName, SkillDraft draft, CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(GetDraftPath(serverName))!);
+        return WriteJsonAtomicAsync(GetDraftPath(serverName), draft, ct);
+    }
+
+    public bool DeleteDraft(string serverName) => DeleteFile(GetDraftPath(serverName));
+
+    // ---------------------------------------------------------------- plumbing
+
+    private async Task<T?> ReadJsonAsync<T>(string path, string serverName, string what, CancellationToken ct)
+        where T : class
+    {
+        if (!File.Exists(path))
+            return null;
+
+        try
+        {
+            await using var stream = File.OpenRead(path);
+            return await JsonSerializer.DeserializeAsync<T>(stream, Json, ct);
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Ignoring unreadable {What} for '{Server}'", what, serverName);
+            return null;
+        }
+    }
+
+    private static async Task WriteJsonAtomicAsync<T>(string path, T value, CancellationToken ct)
+    {
+        var gate = WriteLocks.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         var temp = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
             await using (var stream = File.Create(temp))
             {
-                await JsonSerializer.SerializeAsync(stream, baseline, BaselineJson, ct);
+                await JsonSerializer.SerializeAsync(stream, value, Json, ct);
             }
             File.Move(temp, path, overwrite: true);
         }
@@ -102,19 +241,18 @@ public class SkillStore
         }
     }
 
-    /// <summary>Keyed by full path so every <see cref="SkillStore"/> on the same directory shares them.</summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> BaselineWriteLocks =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    public bool DeleteBaseline(string serverName)
+    private static bool DeleteFile(string path)
     {
-        var path = GetBaselinePath(serverName);
         if (!File.Exists(path)) return false;
         File.Delete(path);
         return true;
     }
 
-    private static readonly JsonSerializerOptions BaselineJson = new(JsonSerializerDefaults.Web)
+    /// <summary>Keyed by full path so every <see cref="SkillStore"/> on the same directory shares them.</summary>
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WriteLocks =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
     };
@@ -124,4 +262,10 @@ public class SkillStore
 
     private string GetBaselinePath(string serverName) =>
         Path.Combine(_skillsDir, $"{serverName}.baseline.json");
+
+    private string GetHistoryDir(string serverName) =>
+        Path.Combine(_skillsDir, "history", serverName);
+
+    private string GetDraftPath(string serverName) =>
+        Path.Combine(_skillsDir, "drafts", $"{serverName}.json");
 }

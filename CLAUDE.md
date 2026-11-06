@@ -110,7 +110,14 @@ version/fingerprint rules when a baseline exists. `SkillDriftCalculator` diffs b
 (`ServiceDetails.SkillDrift`, set only when stale). `get_service_skill` prepends `SkillNotice.Render` for a
 stale downstream (best-effort, 10 s, never for the aggregator itself), and both save paths run
 `SkillNotice.Strip` so a fetched-and-saved document never stores the notice. REST `GET .../skill` stays raw.
-Roadmap (LLM revision, background upkeep, change sources: #57–#59): `docs/skill-maintenance.md`.
+LLM revision (#57): `SkillMaintainer.RefreshAsync` behind the admin tool `refresh_skill` (keyed
+`IChatClient` `"skill-maintenance"` when `SkillMaintenance:Model` is set, else the default one; available only
+with `AI:Enabled`). Drafts are stored in `skills/drafts/{name}.json` and `apply: true` publishes the stored draft
+as is while its `BasedOnSha256` and server version still match. `SkillDraftValidator` is the mechanical gate (never
+model-judged). Every `SkillStore.SetAsync` archives the replaced version plus its baseline under
+`skills/history/{name}/`; `restore_skill` reinstates a version's baseline via `SkillSnapshot.ApplyBaselineAsync`
+(fingerprint recomputed from the stored catalog). Tests use `Helpers/FakeChatClient`.
+Roadmap (background upkeep, change sources: #58–#59): `docs/skill-maintenance.md`.
 
 ## Configuration
 

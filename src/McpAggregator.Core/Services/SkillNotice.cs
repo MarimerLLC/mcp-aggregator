@@ -70,7 +70,7 @@ public static class SkillNotice
         return trimmed[(end + EndMarker.Length)..].TrimStart('\r', '\n');
     }
 
-    private static IEnumerable<string> ChangeLines(SkillDrift drift)
+    internal static IEnumerable<string> ChangeLines(SkillDrift drift)
     {
         if (drift.InstructionsChanged)
             yield return "the server's instructions changed";

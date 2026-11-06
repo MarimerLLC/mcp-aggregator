@@ -195,8 +195,9 @@ Lazy activation is **per session** and is the aggregator's progressive disclosur
 starts with nine consumer tools (`find_tools`, `list_services`, `get_service_details`,
 `get_service_skill`, `invoke_tool`, `get_prompt`, `read_resource`, `refresh_service`,
 `show_admin_tools`), about 5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
-drills into a server; the seven administrative tools (`register_server`, `update_server`,
-`unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`)
+drills into a server; the ten administrative tools (`register_server`, `update_server`,
+`unregister_server`, `update_skill`, `refresh_skill`, `list_skill_history`, `restore_skill`,
+`regenerate_summary`, `enable_service`, `disable_service`)
 join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
 list. A client that already knows a name (from `find_tools`, a skill document, an earlier
 session) can call it directly; the aggregator resolves it by name and, from then on, lists it for
@@ -251,6 +252,9 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | `unregister_server` | Remove a registered server |
 | `update_server` | Update a registered server's transport configuration or metadata |
 | `update_skill` | Set or update a server's skill document |
+| `refresh_skill` | Ask the AI model to revise a stale skill document: returns a validated draft and diff, and publishes it with `apply: true` (see [Skill revision](#skill-revision)) |
+| `list_skill_history` | List the replaced versions of a server's skill document |
+| `restore_skill` | Restore an earlier version of a server's skill document |
 | `regenerate_summary` | Re-generate the AI summary for a registered server |
 
 ## REST API
@@ -303,6 +307,7 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 | `IndexCacheTtl` | 5 minutes | How long to cache the service index |
 | `ConnectionIdleTimeout` | 30 minutes | Disconnect downstream servers after this idle period |
 | `DefaultToolTimeout` | 30 seconds | Timeout for downstream tool calls |
+| `SkillHistoryLimit` | 20 | Replaced skill-document versions kept per server for `restore_skill` (0 keeps none) |
 | `Http:SessionMode` | `StatefulForInitializeClients` | HTTP host only: `Stateless`, `Stateful`, or sessions only for clients that use the legacy `initialize` handshake |
 | `WrapperMode` | `Lazy` | When typed `{server}__{tool}` wrappers appear in `tools/list`, `{server}__{prompt}` prompts in `prompts/list` and `mcp-aggregator://{server}/{uri}` resources in `resources/list`; see [Typed wrapper tools](#typed-wrapper-tools) |
 | `SelfName` | `mcp-aggregator` | Name used for the aggregator's own entry in the service index |
@@ -311,6 +316,37 @@ Settings are in `appsettings.json` under the `McpAggregator` section:
 All settings can be overridden with environment variables using the `MCPAGGREGATOR__` prefix (e.g., `MCPAGGREGATOR__CONNECTIONIDLETIMEOUT=01:00:00`).
 
 **Precedence** (highest to lowest): CLI switches > environment variables > user secrets (Development) > appsettings.json > defaults.
+
+### Skill revision
+
+When a downstream changes, its skill document goes stale: `get_service_skill` warns callers and
+`get_service_details` lists the changes (`skillDrift`). With an AI endpoint configured (below),
+`refresh_skill(serverName)` asks the model for a **minimal edit** that fixes what the changes
+invalidated. It returns the draft, a diff and the result of mechanical checks:
+
+- no removed tool or prompt is still named;
+- every new one is documented or deliberately listed as left out;
+- the length stays within bounds;
+- no URL or email address appears that isn't in the current document or the server's catalog.
+
+Nothing is saved until `refresh_skill(serverName, apply: true)`, which publishes exactly the
+reviewed draft (`regenerate: true` asks for a new one). A draft that fails the checks is never
+published. When only the server's version changed, `apply: true` records the document against
+the new version without calling the model.
+
+Every save keeps the replaced version (with the catalog it was written for) in
+`skills/history/{name}/`; `list_skill_history` and `restore_skill` roll back. Machine-revised
+documents end with a "revised automatically" line. Design and roadmap:
+[docs/skill-maintenance.md](docs/skill-maintenance.md).
+
+Revision uses the `McpAggregator:AI` endpoint and key. A different model, timeout or output limit
+can be set under `McpAggregator:SkillMaintenance`:
+
+```json
+"SkillMaintenance": { "Model": "", "Timeout": "00:02:00", "MaxOutputTokens": 16000 }
+```
+
+`Model` empty means the `AI:Model`. These tools are MCP-only; there is no REST equivalent yet.
 
 ### AI-Generated Server Summaries
 

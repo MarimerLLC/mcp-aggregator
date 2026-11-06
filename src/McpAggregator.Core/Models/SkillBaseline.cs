@@ -45,6 +45,21 @@ public class SkillBaseline
         }).OrderBy(p => p.Name, StringComparer.Ordinal).ToList(),
     };
 
+    /// <summary>The stored catalog in the shape <see cref="Services.SkillFingerprint"/> hashes.</summary>
+    public (List<ToolDetail> Tools, List<PromptDetail> Prompts) ToDetails() => (
+        Tools.Select(t => new ToolDetail { Name = t.Name, Description = t.Description, InputSchema = t.InputSchema }).ToList(),
+        Prompts.Select(p => new PromptDetail
+        {
+            Name = p.Name,
+            Description = p.Description,
+            Arguments = p.Arguments.Select(a => new PromptArgumentDetail
+            {
+                Name = a.Name,
+                Description = a.Description,
+                Required = a.Required,
+            }).ToList(),
+        }).ToList());
+
     internal static JsonElement? ToElement(object? schema) => schema switch
     {
         null => null,

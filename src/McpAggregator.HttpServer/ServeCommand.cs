@@ -102,6 +102,20 @@ public sealed class ServeCommand : AsyncCommand<ServeSettings>
                 var inferenceClient = new ChatCompletionsClient(new Uri(options.Endpoint), credential);
                 return inferenceClient.AsIChatClient(options.Model);
             });
+
+            // Skill revision (issue #57) may use a stronger model on the same endpoint.
+            var skillModel = builder.Configuration.GetSection(SkillMaintenanceOptions.SectionName)
+                .Get<SkillMaintenanceOptions>()?.Model;
+            if (!string.IsNullOrWhiteSpace(skillModel))
+            {
+                builder.Services.AddKeyedSingleton<IChatClient>(SkillMaintenanceOptions.ChatClientKey, (sp, _) =>
+                {
+                    var options = sp.GetRequiredService<IOptions<AiOptions>>().Value;
+                    var credential = new Azure.AzureKeyCredential(options.ApiKey);
+                    var inferenceClient = new ChatCompletionsClient(new Uri(options.Endpoint), credential);
+                    return inferenceClient.AsIChatClient(skillModel);
+                });
+            }
         }
 
         // MCP over Streamable HTTP. The 2026-07-28 revision removed protocol sessions
