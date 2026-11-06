@@ -62,6 +62,10 @@ public class ServiceDetails
     public string? RemoteInstructions { get; set; }
 
     public string? SkillFreshness { get; set; }
+
+    /// <summary>What changed since the skill was written; set only when <see cref="SkillFreshness"/> is <c>stale</c> (issue #56).</summary>
+    public SkillDrift? SkillDrift { get; set; }
+
     public string? SkillRecordedVersion { get; set; }
     public DateTimeOffset? SkillRecordedAt { get; set; }
 

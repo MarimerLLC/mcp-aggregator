@@ -211,7 +211,7 @@ public class AdminController : ControllerBase
     {
         await _registry.EnsureLoadedAsync(ct);
         _registry.Get(name); // Validate exists
-        await _skillStore.SetAsync(name, request.Markdown, ct);
+        await _skillStore.SetAsync(name, SkillNotice.Strip(request.Markdown), ct);
         await _registry.UpdateSkillFlagAsync(name, true, ct);
         var baselineRecorded = await SkillSnapshot.CaptureAsync(_registry, _toolIndex, name, ct);
         var message = baselineRecorded

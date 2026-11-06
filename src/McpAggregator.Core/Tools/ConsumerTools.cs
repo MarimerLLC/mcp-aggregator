@@ -111,14 +111,44 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "get_service_skill")]
-    [Description("Get the skill document (markdown) for a specific server, describing best practices for using its tools.")]
+    [Description("Get the skill document (markdown) for a specific server, describing best practices for using its tools. When the server has changed since the document was written, it starts with a notice listing what changed; where the two disagree, trust the live tool schemas.")]
     public static async Task<string> GetServiceSkill(
         SkillStore skillStore,
+        ServerRegistry registry,
+        ToolIndex toolIndex,
         [Description("The name of the registered server")] string serverName,
         CancellationToken ct)
     {
         var skill = await skillStore.GetAsync(serverName, ct);
-        return skill ?? "No skill document available for this server.";
+        if (skill is null)
+            return "No skill document available for this server.";
+
+        if (string.Equals(serverName, registry.SelfName, StringComparison.OrdinalIgnoreCase))
+            return skill;
+
+        return await StaleNoticeAsync(toolIndex, serverName, ct) + skill;
+    }
+
+    /// <summary>How long <c>get_service_skill</c> waits on the freshness check before serving the document as is.</summary>
+    private static readonly TimeSpan SkillStatusTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The stale-skill notice (issue #56), or an empty string when the skill is not stale or its
+    /// freshness cannot be determined in time. Never fails the call: the document is the point.
+    /// </summary>
+    private static async Task<string> StaleNoticeAsync(ToolIndex toolIndex, string serverName, CancellationToken ct)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(SkillStatusTimeout);
+        try
+        {
+            var (freshness, drift) = await toolIndex.GetSkillStatusAsync(serverName, cts.Token);
+            return freshness == "stale" && drift is not null ? SkillNotice.Render(drift) : string.Empty;
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return string.Empty;
+        }
     }
 
     [McpServerTool(Name = "invoke_tool")]

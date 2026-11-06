@@ -143,4 +143,43 @@ public class SkillStoreTests
 
         Assert.IsFalse(store.Exists("nonexistent"));
     }
+
+    // --- Baselines (issue #56) ---
+
+    [TestMethod]
+    public async Task SetBaselineAsync_ConcurrentWritesForOneServer_AllSucceedAndLeaveNoTempFiles()
+    {
+        // PR #60 review: two saves of the same skill must not collide on a shared temp file.
+        var store = CreateStore();
+        var writes = Enumerable.Range(0, 20).Select(i => Task.Run(() => store.SetBaselineAsync("svc",
+            new McpAggregator.Core.Models.SkillBaseline { RemoteVersion = $"1.0.{i}", RecordedAt = DateTimeOffset.UtcNow })));
+
+        await Task.WhenAll(writes);
+
+        var baseline = await store.GetBaselineAsync("svc");
+        Assert.IsNotNull(baseline);
+        StringAssert.StartsWith(baseline.RemoteVersion, "1.0.");
+        Assert.AreEqual(0, Directory.GetFiles(Path.Combine(_tempDir, "skills"), "*.tmp").Length);
+    }
+
+    [TestMethod]
+    public async Task GetBaselineAsync_CorruptFile_ReadsAsAbsent()
+    {
+        var store = CreateStore();
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "skills", "svc.baseline.json"), "{ not json");
+
+        Assert.IsNull(await store.GetBaselineAsync("svc"));
+    }
+
+    [TestMethod]
+    public async Task Delete_RemovesTheBaselineToo()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "# Skill");
+        await store.SetBaselineAsync("svc", new McpAggregator.Core.Models.SkillBaseline());
+
+        Assert.IsTrue(store.Delete("svc"));
+
+        Assert.IsNull(await store.GetBaselineAsync("svc"));
+    }
 }

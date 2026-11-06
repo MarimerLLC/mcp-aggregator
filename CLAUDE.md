@@ -100,6 +100,18 @@ Server names are validated at registration (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`,
 aggregator's own name) because they become wrapper-name prefixes. `RegisteredServer.Id` is immutable
 and backfilled on load.
 
+## Skill freshness and drift (issues #28, #41, #56)
+
+`SkillSnapshot.CaptureAsync` (run by `update_skill` and REST `PUT .../skill`) records the version and
+`SkillFingerprint` on `RegisteredServer` and, since #56, the catalog itself as
+`skills/{name}.baseline.json` (`SkillBaseline`, via `ToolIndex.SaveSkillBaselineAsync`; `SkillStore.Delete`
+removes it too). `ToolIndex.ComputeFreshness` adds "instructions differ from the baseline" to the
+version/fingerprint rules when a baseline exists. `SkillDriftCalculator` diffs baseline vs live catalog
+(`ServiceDetails.SkillDrift`, set only when stale). `get_service_skill` prepends `SkillNotice.Render` for a
+stale downstream (best-effort, 10 s, never for the aggregator itself), and both save paths run
+`SkillNotice.Strip` so a fetched-and-saved document never stores the notice. REST `GET .../skill` stays raw.
+Roadmap (LLM revision, background upkeep, change sources: #57–#59): `docs/skill-maintenance.md`.
+
 ## Configuration
 
 All settings under `McpAggregator` section in appsettings.json, overridable via `MCPAGGREGATOR__*` env vars.
