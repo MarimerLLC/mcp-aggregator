@@ -126,6 +126,11 @@ The 2.x line implements the MCP **2026-07-28** spec. Behaviors that matter here:
   populated either way.
 - **SSE failures propagate the real exception** (`HttpRequestException`, `TimeoutException`, genuine
   I/O) instead of a blanket `IOException` wrapper — `ConnectionManager.ShouldRetry` accounts for this.
+- **A Streamable HTTP downstream answers an unimplemented method with HTTP 404 + a JSON-RPC -32601 body**,
+  which the client surfaces as `HttpRequestException`, not `McpProtocolException`.
+  `ExecuteWithRetryAsync` checks `IsMethodNotFoundOverHttp` before `ShouldRetry` and rethrows it as
+  `McpProtocolException(MethodNotFound)`, so optional `prompts/list` / `resources/list` index as empty
+  instead of reconnecting (issue #53). `HttpOptionalMethodTests` hosts a real SDK HTTP server to pin this.
 - **`Tool.inputSchema` is required on deserialization**; a downstream that omits it throws
   `JsonException`, which `ToolIndex.GetToolsForServerAsync` translates into a named `AggregatorException`.
 - Roots/Sampling/Logging are deprecated (`MCP9005`), Tasks moved to `ModelContextProtocol.Extensions.Tasks`,
