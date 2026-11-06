@@ -116,6 +116,16 @@ public sealed class ConnectionManager : IAsyncDisposable
         {
             return await operation(client, ct);
         }
+        catch (HttpRequestException ex) when (IsMethodNotFoundOverHttp(ex))
+        {
+            // Checked before ShouldRetry: an HttpRequestException would otherwise read as a broken
+            // connection. Rethrown in the protocol shape so callers' existing MethodNotFound
+            // handling (zero prompts / resources, cached) applies unchanged.
+            _logger.LogDebug(ex, "Server '{Server}' does not implement the requested method (HTTP 404, -32601)",
+                serverName);
+            throw new McpProtocolException(
+                $"Server '{serverName}' does not implement the requested method.", ex, McpErrorCode.MethodNotFound);
+        }
         catch (Exception ex) when (ShouldRetry(ex))
         {
             _logger.LogWarning(ex, "Connection to '{Server}' appears broken, reconnecting", serverName);
@@ -148,7 +158,21 @@ public sealed class ConnectionManager : IAsyncDisposable
     /// reject them as a matter of course.
     /// </summary>
     internal static bool IsUnsupportedCapability(Exception ex)
-        => ex is McpProtocolException { ErrorCode: McpErrorCode.MethodNotFound };
+        => ex is McpProtocolException { ErrorCode: McpErrorCode.MethodNotFound }
+            || (ex is HttpRequestException http && IsMethodNotFoundOverHttp(http));
+
+    /// <summary>
+    /// A Streamable HTTP server built on SDK 2.x answers a method it does not implement with HTTP 404
+    /// and the JSON-RPC -32601 error as the body, and the SDK client surfaces that as an
+    /// <see cref="HttpRequestException"/> rather than an <see cref="McpProtocolException"/>. Both the
+    /// status and the error code must match: a bare 404 is a wrong URL or an expired session and stays
+    /// a retryable connection failure.
+    /// </summary>
+    internal static bool IsMethodNotFoundOverHttp(HttpRequestException ex)
+        => ex.StatusCode == System.Net.HttpStatusCode.NotFound && MethodNotFoundBody.IsMatch(ex.Message);
+
+    private static readonly System.Text.RegularExpressions.Regex MethodNotFoundBody =
+        new("\"code\"\\s*:\\s*-32601\\b", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static bool ShouldRetry(Exception ex)
     {
