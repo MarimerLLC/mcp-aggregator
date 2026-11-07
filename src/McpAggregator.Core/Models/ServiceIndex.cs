@@ -66,6 +66,9 @@ public class ServiceDetails
     /// <summary>What changed since the skill was written; set only when <see cref="SkillFreshness"/> is <c>stale</c> (issue #56).</summary>
     public SkillDrift? SkillDrift { get; set; }
 
+    /// <summary>Release notes and documentation the skill-revision model reads (issue #59), if any are set.</summary>
+    public SkillSources? SkillSources { get; set; }
+
     public string? SkillRecordedVersion { get; set; }
     public DateTimeOffset? SkillRecordedAt { get; set; }
 

@@ -36,4 +36,7 @@ public class RegisteredServer
     public string? SkillRecordedVersion { get; set; }
     public string? SkillRecordedFingerprint { get; set; }
     public DateTimeOffset? SkillRecordedAt { get; set; }
+
+    /// <summary>Release notes and documentation the skill-revision model reads (issue #59); null when none are set.</summary>
+    public SkillSources? SkillSources { get; set; }
 }

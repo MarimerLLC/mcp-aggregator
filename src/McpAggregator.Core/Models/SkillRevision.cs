@@ -41,11 +41,20 @@ public class SkillDraft
     public string? InstructionsSha256 { get; set; }
 
     /// <summary>
+    /// Identity of the change-source configuration the draft was made with (issue #59); null when the
+    /// server had none. Adding or correcting sources makes earlier drafts and markers stale.
+    /// </summary>
+    public string? SourcesSha256 { get; set; }
+
+    /// <summary>
     /// The catalog the draft was written from, recorded as the baseline when it is published, so the
     /// published document is judged against what it was actually written for, not a catalog that
     /// changed while it waited.
     /// </summary>
     public SkillBaseline? Baseline { get; set; }
+
+    /// <summary>What was read from the server's change sources for this draft (issue #59).</summary>
+    public List<SkillSourceReport> Sources { get; set; } = [];
 
     public DateTimeOffset CreatedAt { get; set; }
     public string? Model { get; set; }
@@ -141,4 +150,7 @@ public class SkillRefreshResult
 
     /// <summary>The full proposed document.</summary>
     public string? Draft { get; set; }
+
+    /// <summary>What was read from the server's change sources (issue #59): one entry per file, page, guide call or resource.</summary>
+    public List<SkillSourceReport> Sources { get; set; } = [];
 }

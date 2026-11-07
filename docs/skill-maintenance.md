@@ -288,9 +288,76 @@ The live instance should start in `Propose` and move to `Auto` once a few drafts
 ## Phase 4: change sources (#59)
 
 A catalog diff can't see behavior changes. Most of Adjutant 1.8.x's changes were in its
-changelogs, not its schemas. Each server can name optional `changeNotes` (a URL or GitHub path),
-a `guideTool` (e.g. Adjutant's `get_guide`) and `guideResources`. These feed the model, are
-size-capped, and are treated as untrusted data.
+changelogs, not its schemas. When csla moved from 1.0.0.0 to 2.0.0.0 with an identical catalog,
+the model had nothing to go on at all.
+
+### Configuring sources
+
+`set_skill_sources(serverName, changeNotes?, guideTool?, guideArguments?, guideResources?)`
+stores a `SkillSources` object on `RegisteredServer`. A value sets a field, an empty string clears
+it, and an omitted argument keeps it. The tool validates its input, saves, and then reads the
+sources right away, returning a per-source report (characters, truncation, errors), so a bad path
+shows up immediately. `get_service_details` shows the configured `skillSources`.
+
+| Field | Meaning |
+|---|---|
+| `changeNotes` | An `https://` URL, or GitHub `owner/repo[@ref]:path` naming a file or a folder |
+| `guideTool` | A tool on the server that returns its own documentation (Adjutant's `get_guide`) |
+| `guideArguments` | JSON array of argument objects, one call each (`[{"name":"calendar"}, ...]`); none means one call with no arguments |
+| `guideResources` | JSON array of the server's own resource URIs that hold documentation |
+
+Two deviations from the issue text:
+
+- **A dedicated tool.** The sources have their own admin tool instead of four more arguments on
+  `register_server` / `update_server`.
+- **Explicit guide arguments.** The guide tool is called with explicit `guideArguments` rather
+  than topics guessed from the drift. That keeps it deterministic and works for any guide tool's
+  parameter names.
+
+### Reading them (`SkillSourceReader`)
+
+- **The server's guides first.** Guide tool calls and resources go through `ToolProxyHandler`
+  (`via: skill_maintenance`), with the same timeouts and telemetry as any call. They're read first
+  because the budget runs out in order and they're the more authoritative source.
+- **Change notes over https only, from `SkillMaintenance:AllowedChangeNoteHosts`.** The host match
+  is exact and the defaults are `api.github.com` and `raw.githubusercontent.com`; configured hosts
+  are added to them. A GitHub location goes through the contents API:
+  - a file is decoded from its base64 `content`;
+  - for a folder, only `.md` / `.txt` files whose names start with `yyyy-MM-dd` and are dated on or
+    after the skill's baseline date (`SkillRecordedAt`) are read, newest first, each through its
+    `download_url`, whose host must also be allowed. Undated files are skipped once a baseline date
+    is known.
+- **Private repositories.** `SkillMaintenance:GitHubToken` (keep it in the secret) is sent as a
+  bearer token for them.
+- **Caps.** Each source is limited to `MaxSourceChars` (20 000) and all of a server's sources to
+  `MaxSourcesTotalChars` (60 000). Each read gets `SourceTimeout` (20 s).
+- **Failures.** Every failure becomes a `SkillSourceReport.Error` (HTTP status, disallowed host,
+  timeout, guide-tool error); a revision goes ahead with whatever could be read.
+- **Redirects.** Automatic redirects are off. Each hop is followed by hand and must again be https
+  on an allowed host, so an allowed source can't bounce the fetch elsewhere. The GitHub token is
+  only sent to `api.github.com`.
+- **Budget.** Everything rendered into the prompt counts against `MaxSourcesTotalChars`: headings,
+  text and the cut marker. Headings are capped at 200 characters, so long guide arguments can't
+  blow past the total. Once the budget is spent, the remaining guide calls, resources and change
+  notes are skipped before any request is made.
+- **Draft identity.** A hash of the source configuration is part of a draft's identity
+  (`SourcesSha256`, null when there are no sources). Adding or correcting sources therefore makes
+  earlier drafts, no-change markers and discard markers stale, so the next revision reads the new
+  material.
+
+### Using them
+
+- **The prompt.** The model gets `<server_guides>` and `<change_notes>` sections after the catalog.
+  The system prompt lists both among the data-only sections, says to use them for behavior changes
+  that matter to callers, and says the catalog wins where they disagree.
+- **Version-only changes.** With sources set, a version-only change (an identical catalog) goes to
+  the model, both through `refresh_skill` and in the upkeep, instead of being re-recorded without a
+  look. With no relevant notes, the model returns the document unchanged and the result is
+  `no_changes`.
+- **The URL/email allowlist.** It extends to the server's own guides, which are as trusted as its
+  catalog, but not to change notes, which come from outside the server.
+- **Reporting.** Drafts and `refresh_skill` results carry `sources`: what was read, how much, and
+  what failed.
 
 ## Trust
 

@@ -410,6 +410,7 @@ public class ToolIndex
             RemoteInstructions = server.RemoteInstructions,
             SkillFreshness = skillFreshness,
             SkillDrift = skillDrift,
+            SkillSources = server.SkillSources,
             SkillRecordedVersion = server.SkillRecordedVersion,
             SkillRecordedAt = server.SkillRecordedAt,
             Tools = tools,

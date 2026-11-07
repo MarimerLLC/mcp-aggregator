@@ -25,7 +25,7 @@ public class AdminTools
     {
         "register_server", "update_server", "unregister_server", "update_skill", "regenerate_summary",
         "enable_service", "disable_service", "refresh_skill", "list_skill_history", "restore_skill",
-        "list_skill_drafts", "apply_skill_draft", "discard_skill_draft",
+        "list_skill_drafts", "apply_skill_draft", "discard_skill_draft", "set_skill_sources",
     };
 
     /// <summary>Name and description of every tool declared here, in declaration order.</summary>
@@ -267,6 +267,81 @@ public class AdminTools
     {
         var result = await maintainer.RefreshAsync(serverName, apply, regenerate, ct);
         return JsonSerializer.Serialize(result, SkillMaintainer.ResultJson);
+    }
+
+    [McpServerTool(Name = "set_skill_sources")]
+    [Description("Name a server's change sources: release notes and documentation the skill-revision model reads, so it can see behavior changes a schema diff can't show. Pass a value to set it, an empty string to clear it, or omit it to keep it. Returns what reading the sources produces right now (characters and errors per source). With sources set, a version-only change is also revised by the model rather than just re-recorded.")]
+    public static async Task<string> SetSkillSources(
+        ServerRegistry registry,
+        SkillSourceReader reader,
+        [Description("The name of the registered server")] string serverName,
+        [Description("Release notes: an https URL on an allowed host, or a GitHub location 'owner/repo[@ref]:path' naming a file or a folder (files named yyyy-MM-dd-... are read from the skill's baseline date on).")] string? changeNotes = null,
+        [Description("A tool on this server that returns its own documentation, e.g. 'get_guide'.")] string? guideTool = null,
+        [Description("JSON array of argument objects for guideTool, one call each, e.g. [{\"name\":\"calendar\"},{\"name\":\"email\"}]. Omitted or [] = one call with no arguments.")] string? guideArguments = null,
+        [Description("JSON array of this server's own resource URIs that hold documentation.")] string? guideResources = null,
+        CancellationToken ct = default)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        var server = registry.Get(serverName);
+        var sources = server.SkillSources is { } existing
+            ? new SkillSources
+            {
+                ChangeNotes = existing.ChangeNotes,
+                GuideTool = existing.GuideTool,
+                GuideArguments = existing.GuideArguments,
+                GuideResources = existing.GuideResources,
+            }
+            : new SkillSources();
+
+        if (changeNotes is not null)
+        {
+            if (changeNotes.Trim().Length > 0 && reader.ValidateChangeNotes(changeNotes.Trim()) is { } invalid)
+                return $"Not saved: {invalid}";
+            sources.ChangeNotes = changeNotes.Trim().Length == 0 ? null : changeNotes.Trim();
+        }
+        if (guideTool is not null)
+            sources.GuideTool = guideTool.Trim().Length == 0 ? null : guideTool.Trim();
+        if (guideArguments is not null)
+        {
+            try
+            {
+                sources.GuideArguments = guideArguments.Trim().Length == 0
+                    ? null
+                    : JsonSerializer.Deserialize<List<JsonElement>>(guideArguments);
+            }
+            catch (JsonException ex)
+            {
+                return $"Not saved: guideArguments must be a JSON array of objects ({ex.Message}).";
+            }
+            if (sources.GuideArguments?.Any(a => a.ValueKind != JsonValueKind.Object) == true)
+                return "Not saved: every guideArguments entry must be a JSON object.";
+        }
+        if (guideResources is not null)
+        {
+            try
+            {
+                sources.GuideResources = guideResources.Trim().Length == 0
+                    ? null
+                    : JsonSerializer.Deserialize<List<string>>(guideResources);
+            }
+            catch (JsonException ex)
+            {
+                return $"Not saved: guideResources must be a JSON array of URIs ({ex.Message}).";
+            }
+        }
+
+        await registry.UpdateSkillSourcesAsync(serverName, sources, ct);
+        server = registry.Get(serverName);
+        if (server.SkillSources is null)
+            return $"Cleared the skill change sources for '{serverName}'.";
+
+        var material = await reader.ReadAsync(server, server.SkillRecordedAt, ct);
+        return JsonSerializer.Serialize(new
+        {
+            message = $"Saved the skill change sources for '{serverName}'. Below is what they produce right now, from the skill's baseline date ({server.SkillRecordedAt:yyyy-MM-dd}) on.",
+            sources = server.SkillSources,
+            read = material.Reports,
+        }, SkillMaintainer.ResultJson);
     }
 
     [McpServerTool(Name = "list_skill_drafts")]
