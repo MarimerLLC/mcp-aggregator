@@ -104,6 +104,8 @@ public sealed partial class SkillMaintainer
         {
             if (!apply)
             {
+                if (stored.NoChanges)
+                    return WithDraft(NoChangesResult(serverName, drift), stored, current, fromStored: true);
                 return WithDraft(Result("proposed", stored.ValidationPassed
                     ? "This draft was prepared earlier and still fits the current document and server. Call refresh_skill with apply: true (or apply_skill_draft) to publish exactly this draft, or regenerate: true for a new one."
                     : "This draft was prepared earlier and failed validation; see problems. Edit the document by hand with update_skill, or call refresh_skill with regenerate: true.",
@@ -133,6 +135,14 @@ public sealed partial class SkillMaintainer
         }
 
         await _skillStore.SetDraftAsync(serverName, draft, ct);
+
+        if (draft.NoChanges)
+        {
+            _logger.LogInformation("Skill revision for '{Server}': the model found nothing to change", serverName);
+            return apply
+                ? await AcceptUnchangedAsync(serverName, draft, current, drift, ct)
+                : WithDraft(NoChangesResult(serverName, drift), draft, current);
+        }
 
         if (!apply)
         {
@@ -251,6 +261,7 @@ public sealed partial class SkillMaintainer
                 ServerVersion = stored.ServerVersion,
                 Model = stored.Model,
                 ValidationPassed = stored.ValidationPassed,
+                NoChanges = stored.NoChanges,
                 Problems = stored.Problems,
                 Omitted = stored.Omitted,
                 Current = fits,
@@ -265,6 +276,9 @@ public sealed partial class SkillMaintainer
     private async Task<SkillRefreshResult> ApplyStoredAsync(
         string serverName, SkillDraft stored, string current, SkillDrift? drift, CancellationToken ct)
     {
+        if (stored.NoChanges)
+            return await AcceptUnchangedAsync(serverName, stored, current, drift, ct);
+
         if (!stored.ValidationPassed)
         {
             return WithDraft(Result("rejected",
@@ -329,6 +343,39 @@ public sealed partial class SkillMaintainer
         return true;
     }
 
+    /// <summary>
+    /// Accepts the document as it stands for the server state the model reviewed: the catalog the
+    /// marker was made from becomes the baseline, and the text is not touched (so no history entry).
+    /// The caller has just checked that the marker still fits; a document saved since then would no
+    /// longer match its hash and is reported as a conflict instead.
+    /// </summary>
+    private async Task<SkillRefreshResult> AcceptUnchangedAsync(
+        string serverName, SkillDraft marker, string current, SkillDrift? drift, CancellationToken ct)
+    {
+        var now = await _skillStore.GetAsync(serverName, ct);
+        if (now is null || SkillStore.ContentHash(now) != marker.BasedOnSha256)
+        {
+            _skillStore.DeleteDraft(serverName);
+            return Conflict(serverName, drift);
+        }
+
+        if (marker.Baseline is not null)
+            await SkillSnapshot.ApplyBaselineAsync(_registry, _toolIndex, serverName, marker.Baseline, ct);
+        else
+            await SkillSnapshot.CaptureAsync(_registry, _toolIndex, serverName, ct);
+        _skillStore.DeleteDraft(serverName);
+        _logger.LogInformation("Recorded the unchanged skill for '{Server}' against {Version}", serverName, marker.ServerVersion);
+        return WithDraft(Result("rebaselined",
+            $"The model found nothing to change, so the skill document for '{serverName}' is now recorded against " +
+            $"{marker.ServerVersion ?? "the current server"} as it stands. The text is unchanged.", drift), marker, current);
+    }
+
+    private static SkillRefreshResult NoChangesResult(string serverName, SkillDrift? drift)
+        => Result("no_changes",
+            $"The model reviewed the changes to '{serverName}' and found nothing in the skill document to revise. If the guidance " +
+            "still holds, call refresh_skill with apply: true (or apply_skill_draft) to record the document as current " +
+            "without changing it; otherwise edit it with update_skill, or ask again with regenerate: true.", drift);
+
     private static SkillRefreshResult Conflict(string serverName, SkillDrift? drift)
         => Result("conflict",
             $"The skill document for '{serverName}' was saved by someone else while this revision was prepared, so nothing was published " +
@@ -349,8 +396,10 @@ public sealed partial class SkillMaintainer
         cts.CancelAfter(_options.Timeout);
         var response = await _chat!.GetResponseAsync(
             [
-                new ChatMessage(ChatRole.System, SystemPrompt),
-                new ChatMessage(ChatRole.User, UserPrompt(server, drift, catalog, document)),
+                // Raw string literals carry the source file's line endings (CRLF in a Windows checkout); the
+                // model should see the same text wherever the aggregator was built.
+                new ChatMessage(ChatRole.System, SystemPrompt.ReplaceLineEndings("\n")),
+                new ChatMessage(ChatRole.User, UserPrompt(server, drift, catalog, document).ReplaceLineEndings("\n")),
             ],
             new ChatOptions { MaxOutputTokens = _options.MaxOutputTokens },
             cts.Token);
@@ -368,9 +417,14 @@ public sealed partial class SkillMaintainer
         if (markdown.Length > SkillStore.MaxSkillSize)
             problems.Add($"The draft with its provenance line is {markdown.Length} characters; the limit is {SkillStore.MaxSkillSize}.");
 
+        // The model kept the document as it is. Validation still has to pass: a document that still
+        // names a removed tool is wrong even if the model left it alone, and stays a failed draft.
+        var noChanges = problems.Count == 0 && SameText(document, StripProvenance(markdown));
+
         return new SkillDraft
         {
-            Markdown = markdown,
+            Markdown = noChanges ? current : markdown,
+            NoChanges = noChanges,
             BasedOnSha256 = currentHash,
             ServerVersion = server.RemoteVersion,
             CatalogFingerprint = SkillFingerprint.Compute(tools, prompts),
@@ -488,6 +542,14 @@ public sealed partial class SkillMaintainer
 
         text = StripProvenance(SkillNotice.Strip(text)).Trim();
         return (text.Length == 0 ? string.Empty : text + "\n", omitted);
+    }
+
+    /// <summary>Equal apart from line endings and trailing whitespace on each line and at the end.</summary>
+    internal static bool SameText(string a, string b)
+    {
+        static string Normalize(string text)
+            => string.Join("\n", text.Replace("\r\n", "\n").Split('\n').Select(l => l.TrimEnd())).Trim();
+        return string.Equals(Normalize(a), Normalize(b), StringComparison.Ordinal);
     }
 
     internal static string StripProvenance(string markdown)

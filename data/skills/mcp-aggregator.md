@@ -295,6 +295,8 @@ The aggregator may also draft revisions on its own: its background upkeep can ru
 
 `refresh_skill(serverName)` also returns a waiting draft that still fits instead of asking the model again; pass `regenerate: true` for a new one.
 
+`status: "no_changes"` means the model reviewed what changed and found nothing in the document to revise. If you agree the guidance still holds, `refresh_skill(serverName, apply: true)` or `apply_skill_draft(serverName)` records the document as current without changing its text.
+
 ### Regenerating Summaries
 
 Use `regenerate_summary` to refresh a server's AI-generated summary (the description shown in `list_services`). This is rarely needed — summaries are generated automatically at registration. Use it if a server's tools have changed significantly or if the original summary was inaccurate.

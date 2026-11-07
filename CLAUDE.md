@@ -121,7 +121,11 @@ Background upkeep (#58): `SkillMaintenanceHostedService` (registered in `AddAggr
 `CheckInterval` and on `SkillMaintenanceSignal` (raised by `refresh_service`), mode `SkillMaintenance:Mode`
 (`Off`/`Notify`/`Propose`/`Auto`). `SkillMaintainer` decides draft reuse with one `ServerState` (document hash,
 version, catalog fingerprint, instructions hash); `discard_skill_draft` keeps the file with `Discarded = true` as
-the "already tried" marker. Tests drive `SweepAsync` / `CheckServerAsync` directly with a manual `TimeProvider`.
+the "already tried" marker. A draft that passes validation and equals the current document (ignoring line endings,
+trailing whitespace and the provenance line) is a `NoChanges` marker: `refresh_skill` returns `no_changes`, and
+applying it re-baselines without touching the text. The prompts go through `ReplaceLineEndings("\n")`, because raw
+string literals carry the checkout's CRLF on Windows. Tests drive `SweepAsync` / `CheckServerAsync` directly with a
+manual `TimeProvider`.
 Roadmap (change sources: #59): `docs/skill-maintenance.md`.
 
 ## Configuration
