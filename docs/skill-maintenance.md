@@ -248,7 +248,17 @@ The draft tools:
   `no_draft`, `obsolete` (no longer fits), `rejected` (failed validation), `applied` and `conflict`.
 - `discard_skill_draft(serverName)`: marks the draft `Discarded`. The file stays as the
   "already tried this state" marker; it is hidden from the list, can't be applied, and
-  `refresh_skill` ignores it.
+  `refresh_skill` ignores it. The discard is conditional (`SkillStore.DiscardDraftIfUnchangedAsync`,
+  under the draft's write lock): if a newer draft was saved after it was read, nothing is discarded
+  and the tool says so.
+
+The stale notice announces a waiting draft only if `apply_skill_draft` would accept it: the same
+document/version/catalog/instructions match (`GetCurrentDraftAsync`), and not discarded.
+
+`SkillMaintenanceSignal` drops requests when the mode is `Off` (nothing reads the queue then), and
+otherwise holds at most 64 pending requests; the hourly sweep covers anything dropped. A cancellation
+that isn't host shutdown, such as an HTTP timeout to a downstream, is logged and skipped for that
+server instead of faulting the service.
 
 Drafts stay in `skills/drafts/{name}.json` (from phase 2) rather than a separate `.md`: the JSON
 carries the identity that decides whether a draft still fits.

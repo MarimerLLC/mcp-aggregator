@@ -297,9 +297,12 @@ public class AdminTools
         SkillMaintainer maintainer,
         [Description("The name of the registered server")] string serverName,
         CancellationToken ct = default)
-        => await maintainer.DiscardDraftAsync(serverName, ct)
-            ? $"Discarded the skill-document draft for '{serverName}'."
-            : $"No draft was waiting for '{serverName}'.";
+        => await maintainer.DiscardDraftAsync(serverName, ct) switch
+        {
+            DraftDiscardOutcome.Discarded => $"Discarded the skill-document draft for '{serverName}'.",
+            DraftDiscardOutcome.Replaced => $"A newer draft for '{serverName}' was saved while discarding, so nothing was discarded. Review it with list_skill_drafts.",
+            _ => $"No draft was waiting for '{serverName}'.",
+        };
 
     [McpServerTool(Name = "list_skill_history")]
     [Description("List the replaced versions of a server's skill document, newest first, with the server version each was written for. Pass a version to restore_skill to bring it back.")]

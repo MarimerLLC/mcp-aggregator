@@ -200,18 +200,21 @@ public sealed partial class SkillMaintainer
     /// Marks the stored draft discarded (issue #58). It stays on disk as a marker so the background
     /// upkeep doesn't draft again for the same state; returns false when no draft was waiting.
     /// </summary>
-    public async Task<bool> DiscardDraftAsync(string serverName, CancellationToken ct = default)
+    public async Task<DraftDiscardOutcome> DiscardDraftAsync(string serverName, CancellationToken ct = default)
     {
         await _registry.EnsureLoadedAsync(ct);
         _registry.Get(serverName); // Validate server exists
         var stored = await _skillStore.GetDraftAsync(serverName, ct);
         if (stored is null || stored.Discarded)
-            return false;
+            return DraftDiscardOutcome.NoDraft;
 
-        stored.Discarded = true;
-        await _skillStore.SetDraftAsync(serverName, stored, ct);
-        _logger.LogInformation("Discarded skill draft for '{Server}'", serverName);
-        return true;
+        // Conditional on the draft still being the one just read: a draft saved meanwhile (upkeep,
+        // refresh_skill) must not be replaced by this one marked discarded.
+        var outcome = await _skillStore.DiscardDraftIfUnchangedAsync(
+            serverName, stored.CreatedAt, SkillStore.ContentHash(stored.Markdown), ct);
+        if (outcome == DraftDiscardOutcome.Discarded)
+            _logger.LogInformation("Discarded skill draft for '{Server}'", serverName);
+        return outcome;
     }
 
     /// <summary>

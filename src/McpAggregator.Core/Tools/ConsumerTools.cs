@@ -117,6 +117,7 @@ public class ConsumerTools
         SkillStore skillStore,
         ServerRegistry registry,
         ToolIndex toolIndex,
+        SkillMaintainer maintainer,
         IOptions<SkillMaintenanceOptions> maintenance,
         [Description("The name of the registered server")] string serverName,
         CancellationToken ct)
@@ -129,7 +130,7 @@ public class ConsumerTools
             || maintenance.Value.Mode == SkillMaintenanceMode.Off)
             return skill;
 
-        return await StaleNoticeAsync(toolIndex, skillStore, serverName, skill, ct) + skill;
+        return await StaleNoticeAsync(toolIndex, maintainer, serverName, ct) + skill;
     }
 
     /// <summary>How long <c>get_service_skill</c> waits on the freshness check before serving the document as is.</summary>
@@ -140,7 +141,7 @@ public class ConsumerTools
     /// freshness cannot be determined in time. Never fails the call: the document is the point.
     /// </summary>
     private static async Task<string> StaleNoticeAsync(
-        ToolIndex toolIndex, SkillStore skillStore, string serverName, string skill, CancellationToken ct)
+        ToolIndex toolIndex, SkillMaintainer maintainer, string serverName, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(SkillStatusTimeout);
@@ -150,10 +151,10 @@ public class ConsumerTools
             if (freshness != "stale" || drift is null)
                 return string.Empty;
 
-            // A draft made for this document is waiting (issue #58): say so, so the reader can review it.
-            var draft = await skillStore.GetDraftAsync(serverName, cts.Token);
-            var pending = draft is { Discarded: false } && draft.BasedOnSha256 == SkillStore.ContentHash(skill) ? draft : null;
-            return SkillNotice.Render(drift, pending);
+            // A waiting draft is announced only if apply_skill_draft would accept it: it must fit the
+            // document, version, catalog and instructions (the same match), and not be discarded.
+            var draft = await maintainer.GetCurrentDraftAsync(serverName, cts.Token);
+            return SkillNotice.Render(drift, draft is { Discarded: false } ? draft : null);
         }
         catch (Exception) when (!ct.IsCancellationRequested)
         {

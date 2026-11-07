@@ -70,7 +70,7 @@ public sealed class SkillMaintenanceHostedService : BackgroundService
             {
                 if (_time.GetUtcNow() >= nextSweep)
                 {
-                    await RunSafelyAsync(() => SweepAsync(stoppingToken), "sweep");
+                    await RunSafelyAsync(() => SweepAsync(stoppingToken), "sweep", stoppingToken);
                     nextSweep = _time.GetUtcNow() + _options.CheckInterval;
                 }
 
@@ -87,7 +87,7 @@ public sealed class SkillMaintenanceHostedService : BackgroundService
                         while (_signal.Reader.TryRead(out var name))
                             requested.Add(name);
                         foreach (var name in requested)
-                            await RunSafelyAsync(() => CheckServerAsync(name, stoppingToken), name);
+                            await RunSafelyAsync(() => CheckServerAsync(name, stoppingToken), name, stoppingToken);
                     }
                 }
                 catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
@@ -101,13 +101,18 @@ public sealed class SkillMaintenanceHostedService : BackgroundService
         }
     }
 
-    private async Task RunSafelyAsync(Func<Task> work, string what)
+    /// <summary>
+    /// Runs one unit of upkeep and logs whatever it throws, including a cancellation that isn't the
+    /// host stopping (an HTTP timeout to a downstream surfaces as <see cref="OperationCanceledException"/>),
+    /// so one bad server never faults the background service. Only shutdown propagates.
+    /// </summary>
+    internal async Task RunSafelyAsync(Func<Task> work, string what, CancellationToken stoppingToken)
     {
         try
         {
             await work();
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Skill upkeep {What} failed", what);
         }
@@ -125,7 +130,7 @@ public sealed class SkillMaintenanceHostedService : BackgroundService
                 if (await CheckServerAsync(server.Name, ct))
                     stale++;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 _logger.LogWarning(ex, "Skill upkeep could not check '{Server}'", server.Name);
             }
@@ -152,7 +157,7 @@ public sealed class SkillMaintenanceHostedService : BackgroundService
         {
             (freshness, drift) = await _toolIndex.GetSkillStatusAsync(serverName, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             _logger.LogDebug(ex, "Skill upkeep could not read '{Server}'", serverName);
             return false;

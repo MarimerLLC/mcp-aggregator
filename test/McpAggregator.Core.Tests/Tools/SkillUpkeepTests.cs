@@ -1,6 +1,7 @@
 using System.Text.Json;
 using SysDescription = System.ComponentModel.DescriptionAttribute;
 using McpAggregator.Core.Configuration;
+using McpAggregator.Core.Models;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Tests.Helpers;
 using McpAggregator.Core.Tools;
@@ -92,7 +93,7 @@ public class SkillUpkeepTests
         var maintainer = new SkillMaintainer(harness.Registry, harness.Index, skills, TestHelpers.OptionsOf(options),
             TestHelpers.OptionsOf(new AiOptions { Enabled = true, Model = "test-model" }), services,
             TestHelpers.NullLoggerOf<SkillMaintainer>());
-        var signal = new SkillMaintenanceSignal();
+        var signal = new SkillMaintenanceSignal(TestHelpers.OptionsOf(options));
         var time = new ManualTime();
         var upkeep = new SkillMaintenanceHostedService(harness.Registry, harness.Index, maintainer, TestHelpers.OptionsOf(options),
             signal, TestHelpers.NullLoggerOf<SkillMaintenanceHostedService>(), time);
@@ -110,7 +111,7 @@ public class SkillUpkeepTests
     }
 
     private static Task<string> ServedSkillAsync(Rig rig, string server = Alpha)
-        => ConsumerTools.GetServiceSkill(rig.Skills, rig.Harness.Registry, rig.Harness.Index,
+        => ConsumerTools.GetServiceSkill(rig.Skills, rig.Harness.Registry, rig.Harness.Index, rig.Maintainer,
             TestHelpers.OptionsOf(rig.Options), server, TestTimeout);
 
     // ---------------------------------------------------------------- modes
@@ -347,6 +348,83 @@ public class SkillUpkeepTests
         Assert.AreEqual("proposed", result.Status);
         Assert.IsTrue(result.FromStoredDraft);
         Assert.AreEqual(1, rig.Model.Requests.Count);
+    }
+
+    // ---------------------------------------------------------------- review fixes (PR #62)
+
+    [TestMethod]
+    public async Task Notice_DoesNotAnnounceADraftTheCatalogHasOutdated()
+    {
+        // The draft still matches the document text, but apply_skill_draft would call it obsolete.
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        Upgrade(rig.Harness);
+        await rig.Upkeep.SweepAsync(TestTimeout);
+        rig.Harness.DownstreamTools[Alpha].Add(Tool(ListAccounts, "list_accounts"));
+        rig.Harness.Index.InvalidateCache(Alpha);
+
+        var served = await ServedSkillAsync(rig);
+
+        StringAssert.StartsWith(served, SkillNotice.StartMarker, "Still stale.");
+        Assert.IsFalse(served.Contains("draft of this document"), "The outdated draft must not be announced.");
+        Assert.AreEqual("obsolete", (await rig.Maintainer.ApplyDraftAsync(Alpha, TestTimeout)).Status);
+    }
+
+    [TestMethod]
+    public async Task Discard_LeavesADraftSavedInTheMeantimeAlone()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        Upgrade(rig.Harness);
+        await rig.Upkeep.SweepAsync(TestTimeout);
+        var read = (await rig.Skills.GetDraftAsync(Alpha, TestTimeout))!;
+        // A newer draft lands between discard_skill_draft's read and its write.
+        rig.Model.Respond = _ => Revised + "\nAlso: `create_event` returns the event id.\n";
+        await rig.Maintainer.RefreshAsync(Alpha, apply: false, regenerate: true, TestTimeout);
+
+        var outcome = await rig.Skills.DiscardDraftIfUnchangedAsync(
+            Alpha, read.CreatedAt, SkillStore.ContentHash(read.Markdown), TestTimeout);
+
+        Assert.AreEqual(DraftDiscardOutcome.Replaced, outcome);
+        var stored = (await rig.Skills.GetDraftAsync(Alpha, TestTimeout))!;
+        Assert.IsFalse(stored.Discarded);
+        StringAssert.Contains(stored.Markdown, "returns the event id", "The newer draft survives intact.");
+    }
+
+    [TestMethod]
+    public async Task DiscardTool_ReportsTheOutcome()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        Upgrade(rig.Harness);
+        await rig.Upkeep.SweepAsync(TestTimeout);
+
+        StringAssert.Contains(await AdminTools.DiscardSkillDraft(rig.Maintainer, Alpha, TestTimeout), "Discarded");
+        StringAssert.Contains(await AdminTools.DiscardSkillDraft(rig.Maintainer, Alpha, TestTimeout), "No draft was waiting");
+    }
+
+    [TestMethod]
+    public async Task CancellationThatIsNotShutdown_IsLoggedAndSwallowed()
+    {
+        // An HTTP timeout to a downstream surfaces as TaskCanceledException; it must not fault the service.
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+
+        await rig.Upkeep.RunSafelyAsync(() => throw new TaskCanceledException("downstream timed out"), "test", CancellationToken.None);
+
+        using var stopping = new CancellationTokenSource();
+        stopping.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+            () => rig.Upkeep.RunSafelyAsync(() => throw new OperationCanceledException(stopping.Token), "test", stopping.Token),
+            "Shutdown still propagates.");
+    }
+
+    [TestMethod]
+    public void Signal_IsDroppedWhenUpkeepIsOff_AndBounded()
+    {
+        var off = new SkillMaintenanceSignal(TestHelpers.OptionsOf(new SkillMaintenanceOptions { Mode = SkillMaintenanceMode.Off }));
+        Assert.IsFalse(off.Request(Alpha));
+        Assert.IsFalse(off.Reader.TryRead(out _), "Nothing queues up when no one reads.");
+
+        var on = new SkillMaintenanceSignal(TestHelpers.OptionsOf(new SkillMaintenanceOptions { Mode = SkillMaintenanceMode.Propose }));
+        var accepted = Enumerable.Range(0, SkillMaintenanceSignal.Capacity + 10).Count(i => on.Request($"server-{i}"));
+        Assert.AreEqual(SkillMaintenanceSignal.Capacity, accepted);
     }
 
     // ---------------------------------------------------------------- the running service

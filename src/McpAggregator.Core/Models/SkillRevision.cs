@@ -61,6 +61,19 @@ public class SkillDraft
     public List<string> Omitted { get; set; } = [];
 }
 
+/// <summary>What <c>discard_skill_draft</c> did.</summary>
+public enum DraftDiscardOutcome
+{
+    /// <summary>The draft is now marked discarded.</summary>
+    Discarded,
+
+    /// <summary>No draft was waiting (none stored, or already discarded).</summary>
+    NoDraft,
+
+    /// <summary>A different draft was saved between reading and discarding; it was left alone.</summary>
+    Replaced,
+}
+
 /// <summary>A stored draft as <c>list_skill_drafts</c> reports it (issue #58).</summary>
 public class SkillDraftSummary
 {

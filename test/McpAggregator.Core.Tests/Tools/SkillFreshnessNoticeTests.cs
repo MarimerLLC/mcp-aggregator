@@ -3,6 +3,7 @@ using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Tests.Helpers;
 using McpAggregator.Core.Tools;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 
 namespace McpAggregator.Core.Tests.Tools;
@@ -64,8 +65,13 @@ public class SkillFreshnessNoticeTests
     }
 
     private static Task<string> GetSkillAsync(WrapperHarness harness, SkillStore skills)
-        => ConsumerTools.GetServiceSkill(skills, harness.Registry, harness.Index,
-            TestHelpers.OptionsOf(new SkillMaintenanceOptions()), Server, TestTimeout);
+    {
+        var maintenance = TestHelpers.OptionsOf(new SkillMaintenanceOptions());
+        var maintainer = new SkillMaintainer(harness.Registry, harness.Index, skills, maintenance,
+            TestHelpers.OptionsOf(new AiOptions()), new ServiceCollection().BuildServiceProvider(),
+            TestHelpers.NullLoggerOf<SkillMaintainer>());
+        return ConsumerTools.GetServiceSkill(skills, harness.Registry, harness.Index, maintainer, maintenance, Server, TestTimeout);
+    }
 
     /// <summary>Upgrades the downstream in place: <c>create_event</c> gains <c>isAllDay</c>, <c>list_accounts</c> goes away.</summary>
     private static void UpgradeDownstream(WrapperHarness harness)
