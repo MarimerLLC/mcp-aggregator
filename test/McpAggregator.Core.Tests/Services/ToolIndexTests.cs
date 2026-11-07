@@ -1,4 +1,5 @@
 using SysDescription = System.ComponentModel.DescriptionAttribute;
+using System.Text.Json.Nodes;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Tests.Helpers;
 using McpAggregator.Core.Services;
@@ -271,6 +272,144 @@ public class ToolIndexTests
         Assert.AreEqual(0, resources.Count);
         var details = await harness.Index.GetDetailsAsync("alpha", TestTimeout);
         Assert.AreEqual(0, details.Resources.Count);
+    }
+
+    // ---------------------------------------------------------------- metadata-only refetch (issue #52)
+
+    // TTL re-fetches with no InvalidateCache: a change confined to client-visible metadata (the
+    // input schema / arguments / URI stay the same) must raise the change event once, and a
+    // further identical re-fetch must stay silent.
+
+    private static readonly Annotations ResourceAnnotations = new() { Priority = 0.5f };
+    private static readonly IList<Icon> SomeIcons = [new Icon { Source = "https://example.com/icon.png" }];
+    private static JsonObject SomeMeta() => new() { ["revision"] = 2 };
+
+    private static async Task AssertMetadataOnlyRefetchRaisesOnceAsync(
+        Func<Task> fetch, Action<Action<string>> subscribe, Action changeDownstream, string what)
+    {
+        await fetch();
+        var raised = new List<string>();
+        subscribe(raised.Add);
+
+        await fetch();
+        Assert.AreEqual(0, raised.Count, $"An unchanged {what} must not raise.");
+
+        changeDownstream();
+        await fetch();
+        CollectionAssert.AreEqual(new[] { "alpha" }, raised, $"A {what} change confined to metadata must raise once.");
+
+        await fetch();
+        CollectionAssert.AreEqual(new[] { "alpha" }, raised, $"An identical re-fetch after the {what} change must stay silent.");
+    }
+
+    [TestMethod]
+    [DataRow("annotations")]
+    [DataRow("description")]
+    [DataRow("title")]
+    [DataRow("icons")]
+    [DataRow("_meta")]
+    public async Task Refetch_AfterTtlExpiry_RaisesToolsChanged_WhenOnlyToolMetadataChanged(string field)
+    {
+        await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Eager,
+            o => o.IndexCacheTtl = TimeSpan.Zero,
+            ("alpha", [Tool(Echo, "echo")]));
+
+        await AssertMetadataOnlyRefetchRaisesOnceAsync(
+            () => harness.Index.GetToolsForServerAsync("alpha", TestTimeout),
+            add => harness.Index.ToolsChanged += add,
+            () =>
+            {
+                var tools = harness.DownstreamTools["alpha"];
+                tools.Remove(tools["echo"]);
+                var upgraded = Tool(Echo, "echo");
+                var protocol = upgraded.ProtocolTool;
+                switch (field)
+                {
+                    case "annotations": protocol.Annotations = new ToolAnnotations { ReadOnlyHint = true }; break;
+                    case "description": protocol.Description = "Echoes a message back. Never changes anything."; break;
+                    case "title": protocol.Title = "Echo"; break;
+                    case "icons": protocol.Icons = SomeIcons; break;
+                    case "_meta": protocol.Meta = SomeMeta(); break;
+                    default: Assert.Fail(field); break;
+                }
+                tools.Add(upgraded);
+            },
+            $"tool {field}");
+    }
+
+    [TestMethod]
+    [DataRow("icons")]
+    [DataRow("_meta")]
+    public async Task Refetch_AfterTtlExpiry_RaisesPromptsChanged_WhenOnlyPromptMetadataChanged(string field)
+    {
+        await using var harness = await WrapperHarness.CreateWithPromptsAsync(_dataDir, WrapperToolMode.Eager,
+            o => o.IndexCacheTtl = TimeSpan.Zero,
+            ("alpha", [Tool(Echo, "echo")], [Prompt(Summarize, "summarize")]));
+
+        await AssertMetadataOnlyRefetchRaisesOnceAsync(
+            () => harness.Index.GetPromptsForServerAsync("alpha", TestTimeout),
+            add => harness.Index.PromptsChanged += add,
+            () =>
+            {
+                var prompts = harness.DownstreamPrompts["alpha"];
+                prompts.Remove(prompts["summarize"]);
+                var upgraded = Prompt(Summarize, "summarize");
+                if (field == "icons")
+                    upgraded.ProtocolPrompt.Icons = SomeIcons;
+                else
+                    upgraded.ProtocolPrompt.Meta = SomeMeta();
+                prompts.Add(upgraded);
+            },
+            $"prompt {field}");
+    }
+
+    [TestMethod]
+    [DataRow("file:///readme.md", "annotations")]
+    [DataRow("file:///readme.md", "icons")]
+    [DataRow("file:///readme.md", "_meta")]
+    [DataRow("file:///docs/{name}", "annotations")]
+    [DataRow("file:///docs/{name}", "icons")]
+    [DataRow("file:///docs/{name}", "_meta")]
+    public async Task Refetch_AfterTtlExpiry_RaisesResourcesChanged_WhenOnlyResourceMetadataChanged(string uri, string field)
+    {
+        McpServerResource Create() => uri.Contains('{')
+            ? Resource(Doc, uri, "doc")
+            : Resource(Readme, uri, "readme");
+
+        await using var harness = await WrapperHarness.CreateWithResourcesAsync(_dataDir, WrapperToolMode.Eager,
+            o => o.IndexCacheTtl = TimeSpan.Zero,
+            ("alpha", [Tool(Echo, "echo")], null, [Create()]));
+
+        await AssertMetadataOnlyRefetchRaisesOnceAsync(
+            () => harness.Index.GetResourcesForServerAsync("alpha", TestTimeout),
+            add => harness.Index.ResourcesChanged += add,
+            () =>
+            {
+                var resources = harness.DownstreamResources["alpha"];
+                resources.Remove(resources.Single());
+                var upgraded = Create();
+                if (upgraded.ProtocolResource is { } plain)
+                {
+                    switch (field)
+                    {
+                        case "annotations": plain.Annotations = ResourceAnnotations; break;
+                        case "icons": plain.Icons = SomeIcons; break;
+                        default: plain.Meta = SomeMeta(); break;
+                    }
+                }
+                else
+                {
+                    var template = upgraded.ProtocolResourceTemplate;
+                    switch (field)
+                    {
+                        case "annotations": template.Annotations = ResourceAnnotations; break;
+                        case "icons": template.Icons = SomeIcons; break;
+                        default: template.Meta = SomeMeta(); break;
+                    }
+                }
+                resources.Add(upgraded);
+            },
+            $"resource {field} on {uri}");
     }
 
     // ---------------------------------------------------------------- skill freshness (issue #41)

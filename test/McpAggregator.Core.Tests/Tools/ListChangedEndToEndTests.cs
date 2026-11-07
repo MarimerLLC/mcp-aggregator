@@ -39,6 +39,11 @@ public class ListChangedEndToEndTests
 
     private string _dataDir = null!;
 
+    // Read by the per-connection downstream factory: flipping it simulates shipping a new
+    // downstream version whose echo tool has the same input schema but new annotations and
+    // description (issue #52). Takes effect on the next connection, i.e. after refresh_service.
+    private volatile bool _echoUpgraded;
+
     [TestInitialize]
     public void Initialize()
     {
@@ -118,8 +123,16 @@ public class ListChangedEndToEndTests
         var downstreams = new List<InMemoryMcpServer>();
         provider.GetRequiredService<ConnectionManager>().TransportFactoryOverride = _ =>
         {
-            var downstream = new InMemoryMcpServer(Downstream,
-                McpServerTool.Create(Echo, new McpServerToolCreateOptions { Name = "echo" }));
+            var echoOptions = _echoUpgraded
+                ? new McpServerToolCreateOptions
+                {
+                    Name = "echo",
+                    Description = "Echoes a message back. Never changes anything.",
+                    ReadOnly = true,
+                    Destructive = false,
+                }
+                : new McpServerToolCreateOptions { Name = "echo" };
+            var downstream = new InMemoryMcpServer(Downstream, McpServerTool.Create(Echo, echoOptions));
             lock (downstreams) downstreams.Add(downstream);
             return downstream.ClientTransport;
         };
@@ -300,6 +313,71 @@ public class ListChangedEndToEndTests
         Assert.IsTrue(tools.Any(t => t.Name == "probe__echo"), "The wrapper must survive a refresh.");
         Assert.AreSame(before, rig.Catalog.ActiveWrappers.Single(), "Unchanged schema must reuse the wrapper instance.");
         Assert.AreEqual(0, notifications, "No change means no list_changed.");
+    }
+
+    [TestMethod]
+    public async Task Lazy_RefreshService_ThenGetServiceDetails_ShowsNewAnnotationsAndDescription_WhenSchemaUnchanged()
+    {
+        // The repro from issue #52: the downstream ships a version that changes only a tool's
+        // annotations and description. refresh_service -> get_service_details -> tools/list must
+        // show the new metadata, and the host must be told to re-list.
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+        var (client, firstActivation) = await ConnectAsync(rig);
+
+        var details = await client.CallToolAsync("get_service_details",
+            new Dictionary<string, object?> { ["serverName"] = Downstream }, cancellationToken: TestTimeout);
+        Assert.IsFalse(details.IsError ?? false, TextOf(details));
+        await firstActivation.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var before = (await client.ListToolsAsync(cancellationToken: TestTimeout)).Single(t => t.Name == "probe__echo");
+        Assert.IsNull(before.ProtocolTool.Annotations?.ReadOnlyHint);
+        var schemaBefore = before.JsonSchema.GetRawText();
+
+        var relisted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var registration = client.RegisterNotificationHandler(
+            NotificationMethods.ToolListChangedNotification,
+            (_, _) => { relisted.TrySetResult(); return ValueTask.CompletedTask; });
+
+        _echoUpgraded = true;
+        var refreshed = await client.CallToolAsync("refresh_service",
+            new Dictionary<string, object?> { ["serverName"] = Downstream }, cancellationToken: TestTimeout);
+        Assert.IsFalse(refreshed.IsError ?? false, TextOf(refreshed));
+        details = await client.CallToolAsync("get_service_details",
+            new Dictionary<string, object?> { ["serverName"] = Downstream }, cancellationToken: TestTimeout);
+        Assert.IsFalse(details.IsError ?? false, TextOf(details));
+
+        await relisted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var after = (await client.ListToolsAsync(cancellationToken: TestTimeout)).Single(t => t.Name == "probe__echo");
+        Assert.AreEqual(schemaBefore, after.JsonSchema.GetRawText(), "The test premise: the input schema did not change.");
+        Assert.IsTrue(after.ProtocolTool.Annotations?.ReadOnlyHint, "The new readOnlyHint must reach the client.");
+        Assert.IsFalse(after.ProtocolTool.Annotations?.DestructiveHint ?? true, "The new destructiveHint must reach the client.");
+        StringAssert.Contains(after.Description, "Never changes anything.");
+    }
+
+    [TestMethod]
+    public async Task Eager_RefreshService_RebuildsTheWrapper_WhenOnlyAnnotationsAndDescriptionChanged()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Eager);
+        await rig.Catalog.SyncAsync(TestTimeout);
+        var (client, _) = await ConnectAsync(rig);
+        var before = rig.Catalog.ActiveWrappers.Single();
+
+        var relisted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var registration = client.RegisterNotificationHandler(
+            NotificationMethods.ToolListChangedNotification,
+            (_, _) => { relisted.TrySetResult(); return ValueTask.CompletedTask; });
+
+        _echoUpgraded = true;
+        var refreshed = await client.CallToolAsync("refresh_service",
+            new Dictionary<string, object?> { ["serverName"] = Downstream }, cancellationToken: TestTimeout);
+        Assert.IsFalse(refreshed.IsError ?? false, TextOf(refreshed));
+        await rig.Catalog.PendingSync;
+
+        await relisted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreNotSame(before, rig.Catalog.ActiveWrappers.Single(), "A metadata change must rebuild the wrapper.");
+        var after = (await client.ListToolsAsync(cancellationToken: TestTimeout)).Single(t => t.Name == "probe__echo");
+        Assert.IsTrue(after.ProtocolTool.Annotations?.ReadOnlyHint);
+        StringAssert.Contains(after.Description, "Never changes anything.");
     }
 
     [TestMethod]

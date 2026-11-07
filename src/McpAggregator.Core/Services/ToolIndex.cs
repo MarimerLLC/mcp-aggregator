@@ -465,8 +465,9 @@ public class ToolIndex
 
         if (replaced)
         {
-            // A TTL refresh found a different tool set (or schema) than the one the wrappers were
-            // built from; tell the catalog so the typed wrappers are rebuilt.
+            // A TTL refresh found a different tool set (or definition: schema, description,
+            // annotations, ...) than the one the wrappers were built from; tell the catalog so the
+            // typed wrappers are rebuilt.
             _logger.LogInformation("Tool set for '{Server}' changed on refresh", serverName);
             RaiseToolsChanged(serverName);
         }
@@ -475,9 +476,10 @@ public class ToolIndex
     }
 
     /// <summary>
-    /// Name plus raw input-schema text per tool, in name order. Detects a renamed tool or a schema
-    /// change between refreshes; description-only changes do not count because they do not affect
-    /// how a wrapper is called.
+    /// Name plus a hash of the whole wire definition per tool, in name order: input and output
+    /// schema, title, description, annotations, icons and <c>_meta</c>. Annotations and descriptions
+    /// change client behaviour (confirmation prompts, the model's tool choice), so a change to any of
+    /// them must rebuild the typed wrappers just like a schema change (issue #52).
     /// </summary>
     private static string ComputeToolFingerprint(IEnumerable<ToolDetail> tools)
     {
@@ -485,7 +487,9 @@ public class ToolIndex
         foreach (var t in tools.OrderBy(t => t.Name, StringComparer.Ordinal))
         {
             sb.Append(t.Name).Append('\u0001');
-            sb.Append(t.Protocol?.InputSchema.GetRawText() ?? string.Empty).Append('\u0002');
+            sb.Append(t.Protocol is { } tool
+                ? DownstreamToolWrapper.ComputeFingerprint(tool)
+                : t.Description ?? string.Empty).Append('\u0002');
         }
         return sb.ToString();
     }
@@ -564,20 +568,19 @@ public class ToolIndex
     }
 
     /// <summary>
-    /// Name, title, description and serialized arguments per prompt, in name order. Unlike tools,
-    /// a prompt's description is part of what the host shows the user, so it counts.
+    /// Name plus a hash of the whole wire definition per prompt, in name order: title, description,
+    /// arguments, icons and <c>_meta</c>. All of it is what a host shows the user, so all of it
+    /// counts (issue #52).
     /// </summary>
     private static string ComputePromptFingerprint(IEnumerable<PromptDetail> prompts)
     {
         var sb = new System.Text.StringBuilder();
         foreach (var p in prompts.OrderBy(p => p.Name, StringComparer.Ordinal))
         {
-            sb.Append(p.Name).Append('');
-            sb.Append(p.Protocol?.Title ?? string.Empty).Append('');
-            sb.Append(p.Protocol?.Description ?? p.Description ?? string.Empty).Append('');
-            if (p.Protocol?.Arguments is { } args)
-                sb.Append(JsonSerializer.Serialize(args, McpJsonUtilities.DefaultOptions));
-            sb.Append('');
+            sb.Append(p.Name).Append('\u0001');
+            sb.Append(p.Protocol is { } prompt
+                ? DownstreamPromptWrapper.ComputeFingerprint(prompt)
+                : p.Description ?? string.Empty).Append('\u0002');
         }
         return sb.ToString();
     }
@@ -682,21 +685,34 @@ public class ToolIndex
     }
 
     /// <summary>
-    /// URI (or template), name, title, description, MIME type and size per resource, in URI order.
-    /// All of it is what a host shows the user, so all of it counts.
+    /// URI (or template) plus a hash of the whole wire definition per resource, in URI order: name,
+    /// title, description, MIME type, size, annotations, icons and <c>_meta</c>. All of it is what a
+    /// host shows the user, so all of it counts (issue #52).
     /// </summary>
     private static string ComputeResourceFingerprint(IEnumerable<ResourceDetail> resources)
     {
         var sb = new System.Text.StringBuilder();
         foreach (var r in resources.OrderBy(r => r.DownstreamUri, StringComparer.Ordinal))
         {
-            sb.Append(r.IsTemplate ? 'T' : 'R').Append('');
-            sb.Append(r.DownstreamUri).Append('');
-            sb.Append(r.Name).Append('');
-            sb.Append(r.Title ?? string.Empty).Append('');
-            sb.Append(r.Description ?? string.Empty).Append('');
-            sb.Append(r.MimeType ?? string.Empty).Append('');
-            sb.Append(r.Size?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty).Append('');
+            sb.Append(r.IsTemplate ? 'T' : 'R').Append('\u0001');
+            sb.Append(r.DownstreamUri).Append('\u0001');
+            if (r.Protocol is { } resource)
+            {
+                sb.Append(DownstreamResourceWrapper.ComputeFingerprint(resource));
+            }
+            else if (r.ProtocolTemplate is { } template)
+            {
+                sb.Append(DownstreamResourceWrapper.ComputeFingerprint(template));
+            }
+            else
+            {
+                sb.Append(r.Name).Append('\u0001');
+                sb.Append(r.Title ?? string.Empty).Append('\u0001');
+                sb.Append(r.Description ?? string.Empty).Append('\u0001');
+                sb.Append(r.MimeType ?? string.Empty).Append('\u0001');
+                sb.Append(r.Size?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
+            }
+            sb.Append('\u0002');
         }
         return sb.ToString();
     }

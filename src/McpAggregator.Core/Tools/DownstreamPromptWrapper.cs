@@ -45,7 +45,7 @@ public sealed class DownstreamPromptWrapper : McpServerPrompt
         ServerName = server.Name;
         ServerId = server.Id;
         PromptName = downstream.Name;
-        ArgumentsFingerprint = Fingerprint(downstream);
+        Fingerprint = ComputeFingerprint(downstream);
         _requiredArguments = downstream.Arguments?
             .Where(a => a.Required == true)
             .Select(a => a.Name)
@@ -86,11 +86,12 @@ public sealed class DownstreamPromptWrapper : McpServerPrompt
     public string PromptName { get; }
 
     /// <summary>
-    /// Hash of the downstream prompt's title, description and argument list. The catalog reuses a
-    /// wrapper instance when the name and fingerprint are unchanged so the prompt collection is not
-    /// churned on every refresh.
+    /// Hash of the downstream prompt as it came over the wire: title, description, arguments, icons
+    /// and <c>_meta</c>. The catalog reuses a wrapper instance when the name and fingerprint are
+    /// unchanged so the prompt collection is not churned on every refresh, and rebuilds it when any
+    /// client-visible field changed (issue #52).
     /// </summary>
-    public string ArgumentsFingerprint { get; }
+    public string Fingerprint { get; }
 
     public override async ValueTask<GetPromptResult> GetAsync(
         RequestContext<GetPromptRequestParams> request,
@@ -156,15 +157,10 @@ public sealed class DownstreamPromptWrapper : McpServerPrompt
         return $"[{server.Name}] {description}";
     }
 
-    internal static string Fingerprint(Prompt prompt)
+    internal static string ComputeFingerprint(Prompt prompt)
     {
-        var sb = new StringBuilder();
-        sb.Append(prompt.Title ?? string.Empty).Append('');
-        sb.Append(prompt.Description ?? string.Empty).Append('');
-        if (prompt.Arguments is { } args)
-            sb.Append(JsonSerializer.Serialize(args, McpJsonUtilities.DefaultOptions));
-
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+        var text = JsonSerializer.Serialize(prompt, McpJsonUtilities.DefaultOptions);
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(text));
         return Convert.ToHexString(bytes.AsSpan(0, 8));
     }
 }

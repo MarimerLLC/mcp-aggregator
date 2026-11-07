@@ -360,7 +360,65 @@ public class WrapperToolCatalogTests
         Assert.AreNotSame(before, after);
         Assert.AreEqual("svc__echo", after.ProtocolTool.Name);
         StringAssert.Contains(after.ProtocolTool.InputSchema.GetRawText(), "\"mode\"");
-        Assert.AreNotEqual(before.SchemaFingerprint, after.SchemaFingerprint);
+        Assert.AreNotEqual(before.Fingerprint, after.Fingerprint);
+    }
+
+    [TestMethod]
+    public async Task InvalidateCache_RebuildsWrapperWhenOnlyAnnotationsOrDescriptionChanged()
+    {
+        // Issue #52: a downstream upgrade that leaves the input schema alone but adds annotations
+        // or rewrites the description must still reach clients.
+        await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Eager,
+            ("svc", [Tool(Echo, "echo"), Tool(SearchDocs, "search_docs")]));
+        await harness.Catalog.SyncAsync(TestTimeout);
+        var before = harness.Catalog.ActiveWrappers.Single(w => w.ToolName == "echo");
+        var untouched = harness.Catalog.ActiveWrappers.Single(w => w.ToolName == "search_docs");
+        Assert.IsNull(before.ProtocolTool.Annotations?.ReadOnlyHint);
+
+        var downstream = harness.DownstreamTools["svc"];
+        downstream.Remove(downstream["echo"]);
+        downstream.Add(McpServerTool.Create(Echo, new McpServerToolCreateOptions
+        {
+            Name = "echo",
+            Description = "Echoes a message back. Read-only.",
+            ReadOnly = true,
+        }));
+
+        harness.Index.InvalidateCache("svc");
+        await harness.Catalog.PendingSync;
+
+        var after = harness.Catalog.ActiveWrappers.Single(w => w.ToolName == "echo");
+        Assert.AreNotSame(before, after);
+        Assert.AreEqual(before.ProtocolTool.InputSchema.GetRawText(), after.ProtocolTool.InputSchema.GetRawText(),
+            "The test premise: the input schema did not change.");
+        Assert.IsTrue(after.ProtocolTool.Annotations?.ReadOnlyHint);
+        Assert.AreEqual("[svc] Echoes a message back. Read-only.", after.ProtocolTool.Description);
+        Assert.IsTrue(harness.ToolCollection.Contains(after), "The rebuilt wrapper must replace the stale one in the collection.");
+        Assert.IsFalse(harness.ToolCollection.Contains(before));
+        Assert.AreSame(untouched, harness.Catalog.ActiveWrappers.Single(w => w.ToolName == "search_docs"),
+            "An unchanged tool keeps its instance.");
+    }
+
+    [TestMethod]
+    public async Task Lazy_ReactivatingAfterAMetadataChange_ReplacesTheSessionsStaleWrapper()
+    {
+        await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Lazy,
+            ("svc", [Tool(Echo, "echo")]));
+        await using var session = harness.NewSession();
+        await harness.Catalog.ActivateServerAsync(session.Server, "svc", TestTimeout);
+        var before = harness.Catalog.ActivatedFor(session.Server).Single();
+
+        var downstream = harness.DownstreamTools["svc"];
+        downstream.Remove(downstream["echo"]);
+        downstream.Add(McpServerTool.Create(Echo, new McpServerToolCreateOptions { Name = "echo", Destructive = true }));
+        harness.Index.InvalidateCache("svc");
+        await harness.Catalog.PendingSync;
+
+        await harness.Catalog.ActivateServerAsync(session.Server, "svc", TestTimeout);
+
+        var after = harness.Catalog.ActivatedFor(session.Server).Single();
+        Assert.AreNotSame(before, after);
+        Assert.IsTrue(after.ProtocolTool.Annotations?.DestructiveHint);
     }
 
     [TestMethod]
@@ -479,7 +537,7 @@ public class WrapperToolCatalogTests
 
         var after = harness.Catalog.ActivePromptWrappers.Single(w => w.PromptName == "summarize");
         Assert.AreNotSame(before, after);
-        Assert.AreNotEqual(before.ArgumentsFingerprint, after.ArgumentsFingerprint);
+        Assert.AreNotEqual(before.Fingerprint, after.Fingerprint);
         Assert.AreEqual(2, after.ProtocolPrompt.Arguments!.Count);
         Assert.AreSame(
             harness.Catalog.ActivePromptWrappers.Single(w => w.PromptName == "plan_release"),
