@@ -427,6 +427,148 @@ public class SkillUpkeepTests
         Assert.AreEqual(SkillMaintenanceSignal.Capacity, accepted);
     }
 
+    // ---------------------------------------------------------------- the model finds nothing to change
+
+    /// <summary><c>create_event</c> gains an optional parameter; nothing the document says becomes wrong.</summary>
+    private static void AddParameterOnly(WrapperHarness harness)
+    {
+        var tools = harness.DownstreamTools[Alpha];
+        tools.Remove(tools["create_event"]);
+        tools.Add(Tool(CreateEventV2, "create_event"));
+        harness.Index.InvalidateCache(Alpha);
+    }
+
+    [TestMethod]
+    public async Task UnchangedDocument_IsReportedAsNoChanges_NotAsADraft()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => Document.Replace("\n", "\r\n") + "  \n"; // same text, other line endings
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: false, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("no_changes", result.Status, result.Message);
+        Assert.AreEqual(string.Empty, result.Diff, "Nothing to review.");
+        var marker = (await rig.Skills.GetDraftAsync(Alpha, TestTimeout))!;
+        Assert.IsTrue(marker.NoChanges);
+        Assert.AreEqual(Document, marker.Markdown, "No provenance line on a document nobody revised.");
+        Assert.AreEqual("stale", (await rig.Harness.Index.GetDetailsAsync(Alpha, TestTimeout)).SkillFreshness);
+    }
+
+    [TestMethod]
+    public async Task ApplyingNoChanges_RecordsTheDocumentAsCurrentWithoutTouchingIt()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => Document;
+        await rig.Maintainer.RefreshAsync(Alpha, apply: false, regenerate: false, TestTimeout);
+
+        var result = await rig.Maintainer.ApplyDraftAsync(Alpha, TestTimeout);
+
+        Assert.AreEqual("rebaselined", result.Status, result.Message);
+        Assert.IsTrue(result.FromStoredDraft, "PR #64 review: the stored review was reused.");
+        Assert.AreEqual(1, rig.Model.Requests.Count);
+        Assert.AreEqual(Document, await rig.Skills.GetAsync(Alpha, TestTimeout));
+        Assert.AreEqual(0, (await rig.Skills.ListHistoryAsync(Alpha, TestTimeout)).Count, "The text never changed.");
+        Assert.AreEqual("fresh", (await rig.Harness.Index.GetDetailsAsync(Alpha, TestTimeout)).SkillFreshness);
+        Assert.IsNull(await rig.Skills.GetDraftAsync(Alpha, TestTimeout));
+    }
+
+    [TestMethod]
+    public async Task Propose_NoChangesIsNotAskedAgain_AndTheNoticeSaysSo()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => Document;
+
+        await rig.Upkeep.SweepAsync(TestTimeout);
+        await rig.Upkeep.SweepAsync(TestTimeout);
+
+        Assert.AreEqual(1, rig.Model.Requests.Count, "The reviewed state is remembered.");
+        var served = await ServedSkillAsync(rig);
+        StringAssert.Contains(served, "found nothing in this document to revise");
+        Assert.IsFalse(served.Contains("A revised draft"));
+        var summary = JsonDocument.Parse(await AdminTools.ListSkillDrafts(rig.Maintainer, ct: TestTimeout)).RootElement.EnumerateArray().Single();
+        Assert.IsTrue(summary.GetProperty("noChanges").GetBoolean());
+    }
+
+    [TestMethod]
+    public async Task Auto_NoChangesIsAcceptedAsIs()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Auto);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => Document;
+
+        await rig.Upkeep.SweepAsync(TestTimeout);
+
+        Assert.AreEqual(Document, await rig.Skills.GetAsync(Alpha, TestTimeout));
+        Assert.AreEqual("fresh", (await rig.Harness.Index.GetDetailsAsync(Alpha, TestTimeout)).SkillFreshness);
+        Assert.AreEqual(0, AggregatorTelemetry.StaleSkills);
+    }
+
+    [TestMethod]
+    public async Task UnchangedDocumentThatNamesARemovedTool_IsStillAFailedDraft()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        Upgrade(rig.Harness); // removes list_accounts, which the document names
+        rig.Model.Respond = _ => Document;
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: false, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("proposed", result.Status);
+        Assert.IsFalse(result.ValidationPassed);
+        Assert.IsFalse((await rig.Skills.GetDraftAsync(Alpha, TestTimeout))!.NoChanges);
+    }
+
+    [TestMethod]
+    public async Task ApplyingNoChanges_AfterAHandEdit_IsAConflict()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ =>
+        {
+            rig.Skills.SetAsync(Alpha, Document + "\nEdited while the model looked.\n").GetAwaiter().GetResult();
+            return Document;
+        };
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: true, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("conflict", result.Status, result.Message);
+        StringAssert.Contains(await rig.Skills.GetAsync(Alpha, TestTimeout), "Edited while the model looked.");
+        Assert.AreEqual("stale", (await rig.Harness.Index.GetDetailsAsync(Alpha, TestTimeout)).SkillFreshness,
+            "The reviewed catalog must not have been recorded as the baseline for a document nobody reviewed.");
+    }
+
+    [TestMethod]
+    public async Task GenerateAndApplyNoChanges_IsNotFromAStoredDraft()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => Document;
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: true, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("rebaselined", result.Status, result.Message);
+        Assert.IsFalse(result.FromStoredDraft);
+    }
+
+    [TestMethod]
+    public async Task UnchangedDocumentNearTheSizeLimit_IsStillNoChanges()
+    {
+        // PR #64 review: the provenance line that would push it over the limit is never stored for a marker.
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        var big = Document + new string('x', SkillStore.MaxSkillSize - Document.Length - 20) + "\n";
+        await AdminTools.UpdateSkill(rig.Harness.Registry, rig.Skills, rig.Harness.Index, Alpha, big, TestTimeout);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => big;
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: false, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("no_changes", result.Status, string.Join(" | ", result.Problems));
+        Assert.IsTrue(result.ValidationPassed, "No size problem for text that would never be stored.");
+        Assert.AreEqual(0, result.Problems.Count, string.Join(" | ", result.Problems));
+    }
+
     // ---------------------------------------------------------------- the running service
 
     [TestMethod]

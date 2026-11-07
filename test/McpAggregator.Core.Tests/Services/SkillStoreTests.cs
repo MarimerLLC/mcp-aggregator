@@ -275,4 +275,66 @@ public class SkillStoreTests
         Assert.IsTrue(await store.SetIfUnchangedAsync("svc", SkillStore.ContentHash("someone else's edit"), "draft"));
         Assert.AreEqual("draft", await store.GetAsync("svc"));
     }
+
+    [TestMethod]
+    public async Task RunIfUnchangedAsync_SkipsTheActionWhenTheDocumentChanged()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "original");
+        var ran = false;
+
+        var result = await store.RunIfUnchangedAsync("svc", SkillStore.ContentHash("something else"), () => { ran = true; return Task.CompletedTask; });
+
+        Assert.IsFalse(result);
+        Assert.IsFalse(ran);
+    }
+
+    [TestMethod]
+    public async Task RunIfUnchangedAsync_HoldsTheDocumentLockForTheAction()
+    {
+        // PR #64 review: no save or restore may slip in between the hash check and the baseline update.
+        var store = CreateStore();
+        await store.SetAsync("svc", "original");
+        var inAction = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+
+        var run = store.RunIfUnchangedAsync("svc", SkillStore.ContentHash("original"), async () =>
+        {
+            inAction.SetResult();
+            await release.Task;
+        });
+        await inAction.Task;
+        var save = store.SetAsync("svc", "someone else's edit");
+        await Task.Delay(100);
+
+        Assert.IsFalse(save.IsCompleted, "A save must wait until the action is done.");
+        release.SetResult();
+        Assert.IsTrue(await run);
+        await save;
+        Assert.AreEqual("someone else's edit", await store.GetAsync("svc"));
+    }
+
+    [TestMethod]
+    public async Task SetIfUnchangedAsync_RunsWhileLockedBeforeTheNextSave()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "original");
+        var release = new TaskCompletionSource();
+        var inCallback = new TaskCompletionSource();
+
+        var publish = store.SetIfUnchangedAsync("svc", SkillStore.ContentHash("original"), "draft", async () =>
+        {
+            inCallback.SetResult();
+            await release.Task;
+        });
+        await inCallback.Task;
+        var save = store.SetAsync("svc", "later edit");
+        await Task.Delay(100);
+
+        Assert.IsFalse(save.IsCompleted);
+        release.SetResult();
+        Assert.IsTrue(await publish);
+        await save;
+        Assert.AreEqual("later edit", await store.GetAsync("svc"));
+    }
 }

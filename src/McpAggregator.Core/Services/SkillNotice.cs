@@ -50,7 +50,13 @@ public static class SkillNotice
                 sb.Append("> - and ").Append(lines.Count - MaxChangeLines).Append(" more (see `skillDrift` in `get_service_details`)\n");
         }
 
-        if (pendingDraft is not null)
+        if (pendingDraft is { NoChanges: true })
+        {
+            sb.Append("> The aggregator's model reviewed these changes (")
+              .Append(pendingDraft.CreatedAt.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
+              .Append(") and found nothing in this document to revise; `apply_skill_draft` records it as current.\n");
+        }
+        else if (pendingDraft is not null)
         {
             sb.Append("> A revised draft of this document (")
               .Append(pendingDraft.CreatedAt.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))

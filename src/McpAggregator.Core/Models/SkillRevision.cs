@@ -52,6 +52,14 @@ public class SkillDraft
     public bool ValidationPassed { get; set; }
 
     /// <summary>
+    /// The model reviewed the changes and returned the document as it is (and it passed validation).
+    /// <see cref="Markdown"/> is then the current document; applying the draft records it as current
+    /// without changing the text. It also marks the server state as already reviewed, so the upkeep
+    /// doesn't ask the model again.
+    /// </summary>
+    public bool NoChanges { get; set; }
+
+    /// <summary>
     /// Set by <c>discard_skill_draft</c> (issue #58). The file is kept as a marker so the background
     /// upkeep doesn't draft again for the same document and server state; it is hidden from
     /// <c>list_skill_drafts</c>, can't be applied, and <c>refresh_skill</c> ignores it.
@@ -82,6 +90,10 @@ public class SkillDraftSummary
     public string? ServerVersion { get; set; }
     public string? Model { get; set; }
     public bool ValidationPassed { get; set; }
+
+    /// <summary>The model found nothing to change; applying records the document as current as it stands.</summary>
+    public bool NoChanges { get; set; }
+
     public List<string> Problems { get; set; } = [];
     public List<string> Omitted { get; set; } = [];
 
@@ -104,6 +116,7 @@ public class SkillRefreshResult
     /// <summary>
     /// <c>proposed</c>, <c>applied</c>, <c>rejected</c> (validation failed, nothing saved),
     /// <c>version_only</c>, <c>rebaselined</c>, <c>fresh</c>, <c>unknown</c>, <c>no_skill</c>,
+    /// <c>no_changes</c> (the model found nothing to revise; apply records the document as current),
     /// <c>unavailable</c> (no model configured), <c>no_draft</c> / <c>obsolete</c> (<c>apply_skill_draft</c>
     /// with no draft, or one made for an earlier document or server state), <c>conflict</c> (the document was saved by someone else
     /// while the revision was prepared; nothing published) or <c>failed</c>.

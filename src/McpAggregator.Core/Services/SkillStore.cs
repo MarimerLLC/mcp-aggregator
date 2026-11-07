@@ -53,23 +53,52 @@ public class SkillStore
     /// rolled back. Saving identical text keeps no history entry.
     /// </summary>
     public Task SetAsync(string serverName, string markdown, CancellationToken ct = default)
-        => SetCoreAsync(serverName, markdown, expectedSha256: null, ct);
+        => SetCoreAsync(serverName, markdown, expectedSha256: null, whileLocked: null, ct);
 
     /// <summary>
     /// Saves <paramref name="markdown"/> only if the current document still hashes to
     /// <paramref name="expectedSha256"/> (<see cref="ContentHash"/>); returns false, changing nothing,
     /// when someone saved in between. Used to publish a <c>refresh_skill</c> draft without
-    /// overwriting an edit made while the model was working.
+    /// overwriting an edit made while the model was working. <paramref name="whileLocked"/> runs after
+    /// the write and before the document's lock is released, so the baseline that goes with the new
+    /// text is recorded before any other save or restore can replace the text.
     /// </summary>
-    public Task<bool> SetIfUnchangedAsync(string serverName, string expectedSha256, string markdown, CancellationToken ct = default)
-        => SetCoreAsync(serverName, markdown, expectedSha256, ct);
+    public Task<bool> SetIfUnchangedAsync(
+        string serverName, string expectedSha256, string markdown, Func<Task>? whileLocked = null, CancellationToken ct = default)
+        => SetCoreAsync(serverName, markdown, expectedSha256, whileLocked, ct);
+
+    /// <summary>
+    /// Runs <paramref name="action"/> only if the current document still hashes to
+    /// <paramref name="expectedSha256"/>, holding the document's lock for the check and the action, so no
+    /// save or restore can change the text in between. Returns false, without running it, otherwise.
+    /// Used to record a reviewed-and-unchanged document as current.
+    /// </summary>
+    public async Task<bool> RunIfUnchangedAsync(
+        string serverName, string expectedSha256, Func<Task> action, CancellationToken ct = default)
+    {
+        var path = GetPath(serverName);
+        var gate = LockFor(path);
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (!File.Exists(path) || ContentHash(await File.ReadAllTextAsync(path, ct)) != expectedSha256)
+                return false;
+            await action();
+            return true;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
 
     /// <summary>
     /// Reading the previous text, archiving it and writing the replacement happen under one
     /// per-document lock, so two concurrent saves can't both archive the same predecessor and lose
     /// the version in between, and a conditional save compares against what it actually replaces.
     /// </summary>
-    private async Task<bool> SetCoreAsync(string serverName, string markdown, string? expectedSha256, CancellationToken ct)
+    private async Task<bool> SetCoreAsync(
+        string serverName, string markdown, string? expectedSha256, Func<Task>? whileLocked, CancellationToken ct)
     {
         if (markdown.Length > MaxSkillSizeBytes)
             throw new AggregatorException($"Skill document exceeds maximum size of {MaxSkillSizeBytes} bytes.");
@@ -87,6 +116,8 @@ public class SkillStore
                 await ArchiveAsync(serverName, previous, ct);
 
             await File.WriteAllTextAsync(path, markdown, ct);
+            if (whileLocked is not null)
+                await whileLocked();
         }
         finally
         {

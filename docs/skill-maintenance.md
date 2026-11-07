@@ -260,6 +260,17 @@ otherwise holds at most 64 pending requests; the hourly sweep covers anything dr
 that isn't host shutdown, such as an HTTP timeout to a downstream, is logged and skipped for that
 server instead of faulting the service.
 
+**When the model finds nothing to change.** If a draft passes validation and is the current
+document apart from line endings, trailing whitespace and the provenance line, it isn't a revision.
+`refresh_skill` returns `status: "no_changes"`, and the stored draft is a `NoChanges` marker holding
+the current text with no provenance line. The marker counts as "already reviewed" for that server
+state, so the upkeep doesn't ask again. Accepting it (`apply: true`, `apply_skill_draft`, or `Auto`
+mode) records the document as current against the catalog the model saw, without touching the text
+and without a history entry (`rebaselined`). In `Propose` mode the stale notice says the model found
+nothing to revise. A document that still names a removed tool fails validation even when the model
+left it alone, so it stays an ordinary failed draft. (First seen live on 2026-11-07: csla
+1.0.0.0 → 2.0.0.0 produced a draft that only added the provenance line.)
+
 Drafts stay in `skills/drafts/{name}.json` (from phase 2) rather than a separate `.md`: the JSON
 carries the identity that decides whether a draft still fits.
 
