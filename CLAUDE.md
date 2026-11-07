@@ -126,7 +126,12 @@ trailing whitespace and the provenance line) is a `NoChanges` marker: `refresh_s
 applying it re-baselines without touching the text. The prompts go through `ReplaceLineEndings("\n")`, because raw
 string literals carry the checkout's CRLF on Windows. Tests drive `SweepAsync` / `CheckServerAsync` directly with a
 manual `TimeProvider`.
-Roadmap (change sources: #59): `docs/skill-maintenance.md`.
+Change sources (#59): `RegisteredServer.SkillSources` (set by the admin tool `set_skill_sources`), read by
+`SkillSourceReader`: guide tool calls and resources go through `ToolProxyHandler` (`InvocationPath.SkillMaintenance`);
+change notes are https only, from `AllowedChangeNoteHosts`; for a GitHub folder, only files dated from the baseline
+on. Everything is capped (`MaxSourceChars` / `MaxSourcesTotalChars`) and failures become reports. With sources set, a
+version-only change goes to the model (`SkillMaintainer.HasSources`). Guide text extends the URL/email allowlist;
+change notes don't. Tests: `SkillSourcesTests` with a fake `HttpMessageHandler`. Design: `docs/skill-maintenance.md`.
 
 ## Configuration
 

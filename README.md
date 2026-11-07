@@ -195,10 +195,10 @@ Lazy activation is **per session** and is the aggregator's progressive disclosur
 starts with nine consumer tools (`find_tools`, `list_services`, `get_service_details`,
 `get_service_skill`, `invoke_tool`, `get_prompt`, `read_resource`, `refresh_service`,
 `show_admin_tools`), about 5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
-drills into a server; the thirteen administrative tools (`register_server`, `update_server`,
+drills into a server; the fourteen administrative tools (`register_server`, `update_server`,
 `unregister_server`, `update_skill`, `refresh_skill`, `list_skill_drafts`, `apply_skill_draft`,
-`discard_skill_draft`, `list_skill_history`, `restore_skill`, `regenerate_summary`, `enable_service`,
-`disable_service`)
+`discard_skill_draft`, `set_skill_sources`, `list_skill_history`, `restore_skill`, `regenerate_summary`,
+`enable_service`, `disable_service`)
 join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
 list. A client that already knows a name (from `find_tools`, a skill document, an earlier
 session) can call it directly; the aggregator resolves it by name and, from then on, lists it for
@@ -259,6 +259,7 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | `list_skill_drafts` | List revised skill drafts waiting for review; with `serverName`, the draft text and diff |
 | `apply_skill_draft` | Publish a server's waiting draft as is (never calls the model) |
 | `discard_skill_draft` | Discard a server's waiting draft |
+| `set_skill_sources` | Name a server's release notes and documentation for the revision model to read |
 | `regenerate_summary` | Re-generate the AI summary for a registered server |
 
 ## REST API
@@ -351,6 +352,30 @@ can be set under `McpAggregator:SkillMaintenance`:
 ```
 
 `Model` empty means the `AI:Model`. These tools are MCP-only; there is no REST equivalent yet.
+
+#### Change sources
+
+A schema diff can't show behavior changes. `set_skill_sources(serverName, ...)` names what the
+model should read too:
+
+- `changeNotes`: an `https://` URL, or a GitHub `owner/repo[@ref]:path`. For a folder, the files
+  named `yyyy-MM-dd-...` dated on or after the skill's baseline are read, newest first.
+- `guideTool` + `guideArguments`: the server's own documentation tool, e.g. Adjutant's `get_guide`
+  with `[{"name":"calendar"}, ...]`.
+- `guideResources`: the server's documentation resources.
+
+It reports what reading them produces right away. Change notes are only fetched over https from
+`SkillMaintenance:AllowedChangeNoteHosts` (default `api.github.com`, `raw.githubusercontent.com`).
+Set `SkillMaintenance:GitHubToken` for private repositories. Everything is size-capped
+(`MaxSourceChars`, `MaxSourcesTotalChars`) and passed to the model as data. With sources set, a
+version-only change is also sent to the model. Example (Adjutant):
+
+```
+set_skill_sources(serverName: "adjutant",
+  changeNotes: "MarimerLLC/calendar-mcp:changelogs",
+  guideTool: "get_guide",
+  guideArguments: "[{\"name\":\"calendar\"},{\"name\":\"email\"}]")
+```
 
 #### Background upkeep
 

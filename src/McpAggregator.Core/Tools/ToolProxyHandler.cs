@@ -28,6 +28,9 @@ public static class InvocationPath
 
     /// <summary>The generic <c>read_resource</c> escape hatch.</summary>
     public const string ReadResource = "read_resource";
+
+    /// <summary>The aggregator itself, reading a server's documentation for skill revision (issue #59).</summary>
+    public const string SkillMaintenance = "skill_maintenance";
 }
 
 public class ToolProxyHandler
