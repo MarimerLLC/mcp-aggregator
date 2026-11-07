@@ -304,16 +304,22 @@ public sealed partial class SkillMaintainer
 
     /// <summary>What a draft must have been made from to still fit: the document, version, catalog and instructions.</summary>
     private sealed record ServerState(
-        string DocumentHash, string? Version, string CatalogFingerprint, string InstructionsHash,
+        string DocumentHash, string? Version, string CatalogFingerprint, string InstructionsHash, string? SourcesHash,
         List<ToolDetail> Tools, List<PromptDetail> Prompts)
     {
-        // The catalog and instructions can change without a version bump, so all four must match.
+        // The catalog and instructions can change without a version bump, and a draft made before the
+        // change sources were added or corrected never saw them (issue #59), so all five must match.
         public bool Matches(SkillDraft draft)
             => draft.BasedOnSha256 == DocumentHash
                && draft.ServerVersion == Version
                && draft.CatalogFingerprint == CatalogFingerprint
-               && draft.InstructionsSha256 == InstructionsHash;
+               && draft.InstructionsSha256 == InstructionsHash
+               && draft.SourcesSha256 == SourcesHash;
     }
+
+    /// <summary>Identity of the server's change-source configuration; null when it has none, so drafts from before #59 still match.</summary>
+    internal static string? SourcesHash(RegisteredServer server)
+        => HasSources(server) ? SkillStore.ContentHash(JsonSerializer.Serialize(server.SkillSources)) : null;
 
     private async Task<ServerState> StateAsync(RegisteredServer server, string current, CancellationToken ct)
     {
@@ -324,6 +330,7 @@ public sealed partial class SkillMaintainer
             server.RemoteVersion,
             SkillFingerprint.Compute(tools, prompts),
             SkillStore.ContentHash(server.RemoteInstructions ?? string.Empty),
+            SourcesHash(server),
             tools,
             prompts);
     }
@@ -448,6 +455,7 @@ public sealed partial class SkillMaintainer
             ServerVersion = server.RemoteVersion,
             CatalogFingerprint = SkillFingerprint.Compute(tools, prompts),
             InstructionsSha256 = SkillStore.ContentHash(server.RemoteInstructions ?? string.Empty),
+            SourcesSha256 = SourcesHash(server),
             Baseline = baseline,
             Sources = material.Reports,
             CreatedAt = generatedAt,

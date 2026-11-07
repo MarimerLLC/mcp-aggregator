@@ -41,6 +41,12 @@ public class SkillDraft
     public string? InstructionsSha256 { get; set; }
 
     /// <summary>
+    /// Identity of the change-source configuration the draft was made with (issue #59); null when the
+    /// server had none. Adding or correcting sources makes earlier drafts and markers stale.
+    /// </summary>
+    public string? SourcesSha256 { get; set; }
+
+    /// <summary>
     /// The catalog the draft was written from, recorded as the baseline when it is published, so the
     /// published document is judged against what it was actually written for, not a catalog that
     /// changed while it waited.

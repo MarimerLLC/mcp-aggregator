@@ -36,7 +36,9 @@ public sealed partial class SkillSourceReader
         _proxy = proxy;
         _options = options.Value;
         _logger = logger;
-        _http = http ?? new HttpClient();
+        // Redirects are followed by hand (SendAllowedAsync) so every hop is checked against the
+        // allow-list; an automatic redirect could take an allowed source to any host.
+        _http = http ?? new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false });
     }
 
     /// <summary>
@@ -100,9 +102,11 @@ public sealed partial class SkillSourceReader
     private async Task ReadGuideToolAsync(
         string server, string tool, JsonElement args, Budget budget, StringBuilder into, List<SkillSourceReport> reports, CancellationToken ct)
     {
-        var label = $"{tool} {args.GetRawText()}";
+        var label = Shorten($"{tool} {args.GetRawText()}", MaxLabelChars);
         var report = new SkillSourceReport { Kind = "guide_tool", Source = label };
         reports.Add(report);
+        if (Exhausted(budget, report))
+            return;
         try
         {
             if (args.ValueKind != JsonValueKind.Object)
@@ -126,14 +130,17 @@ public sealed partial class SkillSourceReader
     private async Task ReadGuideResourceAsync(
         string server, string uri, Budget budget, StringBuilder into, List<SkillSourceReport> reports, CancellationToken ct)
     {
-        var report = new SkillSourceReport { Kind = "guide_resource", Source = uri };
+        var label = Shorten(uri, MaxLabelChars);
+        var report = new SkillSourceReport { Kind = "guide_resource", Source = label };
         reports.Add(report);
+        if (Exhausted(budget, report))
+            return;
         try
         {
             using var cts = Linked(ct);
             var result = await _proxy.ReadResourceAsync(server, uri, InvocationPath.SkillMaintenance, cts.Token);
             var text = string.Join("\n", result.Contents.OfType<TextResourceContents>().Select(c => c.Text));
-            Append(into, uri, text, budget, report);
+            Append(into, label, text, budget, report);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -147,17 +154,24 @@ public sealed partial class SkillSourceReader
     private async Task ReadChangeNotesAsync(
         string location, DateTimeOffset? since, Budget budget, StringBuilder into, List<SkillSourceReport> reports, CancellationToken ct)
     {
+        var label = Shorten(location, MaxLabelChars);
         if (ValidateChangeNotes(location) is { } invalid)
         {
-            reports.Add(new SkillSourceReport { Kind = "change_notes", Source = location, Error = invalid });
+            reports.Add(new SkillSourceReport { Kind = "change_notes", Source = label, Error = invalid });
+            return;
+        }
+
+        var first = new SkillSourceReport { Kind = "change_notes", Source = label };
+        if (Exhausted(budget, first))
+        {
+            reports.Add(first);
             return;
         }
 
         if (location.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
-            var report = new SkillSourceReport { Kind = "change_notes", Source = location };
-            reports.Add(report);
-            await FetchTextAsync(new Uri(location), location, budget, into, report, ct);
+            reports.Add(first);
+            await FetchTextAsync(new Uri(location), label, budget, into, first, ct);
             return;
         }
 
@@ -173,28 +187,28 @@ public sealed partial class SkillSourceReader
         try
         {
             using var cts = Linked(ct);
-            using var request = GitHubRequest(api);
-            using var response = await _http.SendAsync(request, cts.Token);
+            using var response = await SendAllowedAsync(api, HttpCompletionOption.ResponseContentRead, cts.Token);
             if (!response.IsSuccessStatusCode)
                 throw new HttpRequestException($"GitHub answered {(int)response.StatusCode} {response.ReasonPhrase}");
             listing = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cts.Token)).RootElement.Clone();
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            reports.Add(new SkillSourceReport { Kind = "change_notes", Source = location, Error = Describe(ex) });
+            first.Error = Describe(ex);
+            reports.Add(first);
             return;
         }
 
         if (listing.ValueKind == JsonValueKind.Object)
         {
             // One file: the contents API returns it base64-encoded.
-            var report = new SkillSourceReport { Kind = "change_notes", Source = location };
+            var report = first;
             reports.Add(report);
             try
             {
                 var content = listing.GetProperty("content").GetString() ?? "";
                 var text = Encoding.UTF8.GetString(Convert.FromBase64String(content.Replace("\n", "")));
-                Append(into, location, text, budget, report);
+                Append(into, label, text, budget, report);
             }
             catch (Exception ex) when (ex is FormatException or KeyNotFoundException or InvalidOperationException)
             {
@@ -218,7 +232,7 @@ public sealed partial class SkillSourceReader
             reports.Add(new SkillSourceReport
             {
                 Kind = "change_notes",
-                Source = location,
+                Source = label,
                 Error = since is null ? "the folder has no .md or .txt files" : $"no dated changelog files on or after {since:yyyy-MM-dd}",
             });
             return;
@@ -226,13 +240,10 @@ public sealed partial class SkillSourceReader
 
         foreach (var file in chosen.OrderByDescending(f => f.Name, StringComparer.Ordinal))
         {
-            var report = new SkillSourceReport { Kind = "change_notes", Source = $"{location}/{file.Name}" };
+            var report = new SkillSourceReport { Kind = "change_notes", Source = Shorten($"{location}/{file.Name}", MaxLabelChars) };
             reports.Add(report);
-            if (budget.TotalLeft <= 0)
-            {
-                report.Error = "skipped: the size limit for all sources was reached";
+            if (Exhausted(budget, report))
                 continue;
-            }
             if (!Uri.TryCreate(file.Url, UriKind.Absolute, out var raw) || !IsAllowed(raw))
             {
                 report.Error = $"download host is not allowed ({raw?.Host})";
@@ -247,10 +258,9 @@ public sealed partial class SkillSourceReader
         try
         {
             using var cts = Linked(ct);
-            using var request = uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase) ? GitHubRequest(uri) : PlainRequest(uri);
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            using var response = await SendAllowedAsync(uri, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"{uri.Host} answered {(int)response.StatusCode} {response.ReasonPhrase}");
+                throw new HttpRequestException($"{response.RequestMessage?.RequestUri?.Host ?? uri.Host} answered {(int)response.StatusCode} {response.ReasonPhrase}");
 
             // Read no more than the per-source cap (plus a little, to know it was cut).
             await using var stream = await response.Content.ReadAsStreamAsync(cts.Token);
@@ -263,6 +273,36 @@ public sealed partial class SkillSourceReader
         {
             report.Error = Describe(ex);
             _logger.LogInformation("Skill source {Source} could not be read: {Error}", label, report.Error);
+        }
+    }
+
+    private const int MaxRedirects = 5;
+
+    /// <summary>
+    /// GET with redirects followed by hand: each target must be https on an allowed host, or the
+    /// request fails without contacting it. GitHub's token is only ever sent to api.github.com.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendAllowedAsync(Uri uri, HttpCompletionOption completion, CancellationToken ct)
+    {
+        for (var hop = 0; ; hop++)
+        {
+            using var request = uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase) ? GitHubRequest(uri) : PlainRequest(uri);
+            var response = await _http.SendAsync(request, completion, ct);
+            var status = (int)response.StatusCode;
+            if (status is not (301 or 302 or 303 or 307 or 308))
+                return response;
+
+            var location = response.Headers.Location;
+            response.Dispose();
+            if (location is null)
+                throw new HttpRequestException($"{uri.Host} redirected without a location");
+            if (hop >= MaxRedirects)
+                throw new HttpRequestException($"more than {MaxRedirects} redirects");
+
+            var target = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            if (!IsAllowed(target))
+                throw new HttpRequestException($"{uri.Host} redirected to a host that is not allowed ({target.Host})");
+            uri = target;
         }
     }
 
@@ -291,23 +331,45 @@ public sealed partial class SkillSourceReader
         public int TotalLeft { get; set; } = totalMax;
     }
 
+    private const int MaxLabelChars = 200;
+    private const string CutMarker = "\n[... cut to the size limit]";
+    private const string SkippedForSize = "skipped: the size limit for all sources was reached";
+
+    /// <summary>True (and reported) when nothing more fits, so the source is not even requested.</summary>
+    private static bool Exhausted(Budget budget, SkillSourceReport report)
+    {
+        if (budget.TotalLeft > 0)
+            return false;
+        report.Error = SkippedForSize;
+        return true;
+    }
+
+    /// <summary>
+    /// Appends one source as <c>### label</c> plus its text. Everything that goes into the prompt
+    /// (heading, text, cut marker, spacing) counts against the total budget; the text alone is held to
+    /// the per-source limit.
+    /// </summary>
     private static void Append(StringBuilder into, string label, string text, Budget budget, SkillSourceReport report)
     {
-        var limit = Math.Min(budget.SourceMax, budget.TotalLeft);
-        if (limit <= 0)
+        var header = "### " + label + "\n";
+        const string trailer = "\n\n";
+        var room = Math.Min(budget.SourceMax, budget.TotalLeft - header.Length - trailer.Length);
+        var body = text.TrimEnd();
+        var truncated = body.Length > room;
+        if (truncated)
+            room -= CutMarker.Length;
+        if (room <= 0)
         {
-            report.Error = "skipped: the size limit for all sources was reached";
+            report.Error = SkippedForSize;
             return;
         }
 
-        var taken = text.Length > limit ? text[..limit] : text;
-        report.Truncated = text.Length > limit;
+        var taken = truncated ? body[..Math.Min(room, body.Length)] : body;
+        var section = header + taken + (truncated ? CutMarker : "") + trailer;
+        into.Append(section);
+        budget.TotalLeft -= section.Length;
         report.Chars = taken.Length;
-        budget.TotalLeft -= taken.Length;
-        into.Append("### ").Append(label).Append('\n').Append(taken.TrimEnd());
-        if (report.Truncated)
-            into.Append("\n[... cut to the size limit]");
-        into.Append("\n\n");
+        report.Truncated = truncated;
     }
 
     private bool IsAllowed(Uri uri)
@@ -331,8 +393,8 @@ public sealed partial class SkillSourceReader
     private static string Describe(Exception ex)
         => ex is OperationCanceledException ? "timed out" : Shorten(ex.Message);
 
-    private static string Shorten(string text)
-        => text.Length > 300 ? text[..300] + "…" : text;
+    private static string Shorten(string text, int max = 300)
+        => text.Length > max ? text[..max] + "…" : text;
 
     [GeneratedRegex(@"^(?<owner>[A-Za-z0-9-]{1,39})/(?<repo>[A-Za-z0-9._-]{1,100})(?:@(?<ref>[A-Za-z0-9._/-]{1,200}))?:(?<path>[A-Za-z0-9._/ -]{0,400})$")]
     private static partial Regex GitHubLocation();

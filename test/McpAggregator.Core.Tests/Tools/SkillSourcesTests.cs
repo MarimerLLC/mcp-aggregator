@@ -31,6 +31,7 @@ public class SkillSourcesTests
     {
         _dataDir = Path.Combine(Path.GetTempPath(), "mcpagg-sources-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
+        _guideCalls = 0;
     }
 
     [TestCleanup]
@@ -44,9 +45,11 @@ public class SkillSourcesTests
     [SysDescription("Create a calendar event.")]
     private static string CreateEvent([SysDescription("Subject")] string subject) => subject;
 
+    private static int _guideCalls;
+
     [SysDescription("Read a guide.")]
     private static string GetGuide([SysDescription("Topic")] string? name = null)
-        => name is null
+        => Interlocked.Increment(ref _guideCalls) > 0 && name is null
             ? "Guides: calendar, email"
             : name == "broken"
                 ? throw new InvalidOperationException("no such guide")
@@ -64,11 +67,18 @@ public class SkillSourcesTests
     private sealed class FakeHttp : HttpMessageHandler
     {
         public Dictionary<string, (HttpStatusCode Status, string Body)> Responses { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> Redirects { get; } = new(StringComparer.Ordinal);
         public List<HttpRequestMessage> Requests { get; } = [];
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add(request);
+            if (Redirects.TryGetValue(request.RequestUri!.ToString(), out var location))
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri(location, UriKind.RelativeOrAbsolute);
+                return Task.FromResult(redirect);
+            }
             var (status, body) = Responses.TryGetValue(request.RequestUri!.ToString(), out var r) ? r : (HttpStatusCode.NotFound, "not found");
             return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8) });
         }
@@ -189,8 +199,8 @@ public class SkillSourcesTests
         await using var rig = await CreateAsync(o =>
         {
             o.AllowedChangeNoteHosts.Add("docs.example.com");
-            o.MaxSourceChars = 50;
-            o.MaxSourcesTotalChars = 70;
+            o.MaxSourceChars = 60;
+            o.MaxSourcesTotalChars = 200;
         });
         rig.Http.Responses["https://docs.example.com/notes.md"] = (HttpStatusCode.OK, new string('n', 500));
         await SetSourcesAsync(rig, new SkillSources
@@ -204,9 +214,11 @@ public class SkillSourcesTests
 
         var guide = material.Reports.Single(r => r.Kind == "guide_tool");
         var notes = material.Reports.Single(r => r.Kind == "change_notes");
-        Assert.IsTrue(guide.Chars <= 50);
+        Assert.IsTrue(guide.Chars <= 60);
         Assert.IsTrue(notes.Truncated);
-        Assert.AreEqual(70 - guide.Chars, notes.Chars, "The total budget limits the later source.");
+        Assert.IsTrue(notes.Chars <= 60, "Per-source limit.");
+        Assert.IsTrue(material.Guides.Length + material.ChangeNotes.Length <= 200,
+            "Headings, text and markers together stay within the total.");
         StringAssert.Contains(material.ChangeNotes, "[... cut to the size limit]");
     }
 
@@ -243,6 +255,91 @@ public class SkillSourcesTests
         var material = await rig.Reader.ReadAsync(rig.Harness.Registry.Get(Server), null, TestTimeout);
 
         StringAssert.Contains(material.Reports.Single().Error, "404");
+    }
+
+    // ---------------------------------------------------------------- PR #65 review
+
+    [TestMethod]
+    public async Task Redirect_ToADisallowedHost_IsRefusedWithoutContactingIt()
+    {
+        await using var rig = await CreateAsync(o => o.AllowedChangeNoteHosts.Add("docs.example.com"));
+        rig.Http.Redirects["https://docs.example.com/notes.md"] = "https://evil.example/notes.md";
+        await SetSourcesAsync(rig, new SkillSources { ChangeNotes = "https://docs.example.com/notes.md" });
+
+        var material = await rig.Reader.ReadAsync(rig.Harness.Registry.Get(Server), null, TestTimeout);
+
+        StringAssert.Contains(material.Reports.Single().Error, "not allowed (evil.example)");
+        Assert.IsFalse(rig.Http.Requests.Any(r => r.RequestUri!.Host == "evil.example"));
+    }
+
+    [TestMethod]
+    public async Task Redirect_ToAnAllowedHost_IsFollowed_AndTheTokenStaysOnGitHub()
+    {
+        await using var rig = await CreateAsync(o => o.GitHubToken = "ghp_test");
+        rig.Http.Redirects["https://api.github.com/repos/owner/repo/contents/CHANGELOG.md"] = "https://raw.githubusercontent.com/owner/repo/main/CHANGELOG.md";
+        rig.Http.Responses["https://raw.githubusercontent.com/owner/repo/main/CHANGELOG.md"] =
+            (HttpStatusCode.OK, JsonSerializer.Serialize(new { content = Base64("Moved but fine."), encoding = "base64" }));
+        await SetSourcesAsync(rig, new SkillSources { ChangeNotes = "owner/repo:CHANGELOG.md" });
+
+        var material = await rig.Reader.ReadAsync(rig.Harness.Registry.Get(Server), null, TestTimeout);
+
+        StringAssert.Contains(material.ChangeNotes, "Moved but fine.");
+        Assert.IsNull(rig.Http.Requests.Single(r => r.RequestUri!.Host == "raw.githubusercontent.com").Headers.Authorization);
+    }
+
+    [TestMethod]
+    public async Task ExhaustedBudget_SkipsLaterSourcesWithoutRequestingThem()
+    {
+        await using var rig = await CreateAsync(o => { o.MaxSourceChars = 1000; o.MaxSourcesTotalChars = 80; });
+        await SetSourcesAsync(rig, new SkillSources
+        {
+            GuideTool = "get_guide",
+            GuideArguments = [JsonSerializer.SerializeToElement(new { name = "calendar" }), JsonSerializer.SerializeToElement(new { name = "email" }), JsonSerializer.SerializeToElement(new { name = "contacts" })],
+            GuideResources = ["guide://overview"],
+            ChangeNotes = "owner/repo:changelogs",
+        });
+
+        var material = await rig.Reader.ReadAsync(rig.Harness.Registry.Get(Server), null, TestTimeout);
+
+        Assert.AreEqual(1, _guideCalls, "Only the first guide fit; the rest were never called.");
+        Assert.AreEqual(4, material.Reports.Count(r => r.Error == "skipped: the size limit for all sources was reached"),
+            string.Join(" | ", material.Reports.Select(r => $"{r.Source}: {r.Error}")));
+        Assert.AreEqual(0, rig.Http.Requests.Count, "No change-notes request once the budget is gone.");
+    }
+
+    [TestMethod]
+    public async Task LongGuideArguments_AreBoundedAndCounted()
+    {
+        await using var rig = await CreateAsync(o => o.MaxSourcesTotalChars = 600);
+        var huge = new string('a', 5000);
+        await SetSourcesAsync(rig, new SkillSources
+        {
+            GuideTool = "get_guide",
+            GuideArguments = [JsonSerializer.SerializeToElement(new { name = huge })],
+        });
+
+        var material = await rig.Reader.ReadAsync(rig.Harness.Registry.Get(Server), null, TestTimeout);
+
+        Assert.IsTrue(material.Guides.Length <= 600, $"rendered {material.Guides.Length}");
+        Assert.IsTrue(material.Reports.Single().Source.Length <= 201);
+    }
+
+    [TestMethod]
+    public async Task ChangingSources_MakesEarlierDraftsStale()
+    {
+        await using var rig = await CreateAsync();
+        await SetSourcesAsync(rig, new SkillSources { GuideTool = "get_guide" });
+        await BumpVersionAsync(rig, "2.0.0");
+        var first = await rig.Maintainer.RefreshAsync(Server, apply: false, regenerate: false, TestTimeout);
+        Assert.AreEqual("no_changes", first.Status);
+        Assert.IsNotNull(await rig.Maintainer.GetCurrentDraftAsync(Server, TestTimeout));
+
+        await SetSourcesAsync(rig, new SkillSources { GuideTool = "get_guide", GuideResources = ["guide://overview"] });
+
+        Assert.IsNull(await rig.Maintainer.GetCurrentDraftAsync(Server, TestTimeout), "The marker never saw the new source.");
+        await rig.Maintainer.RefreshAsync(Server, apply: false, regenerate: false, TestTimeout);
+        Assert.AreEqual(2, rig.Model.Requests.Count);
+        StringAssert.Contains(rig.Model.Requests[1][1].Text, "Overview: start with list_accounts.");
     }
 
     // ---------------------------------------------------------------- guides

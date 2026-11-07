@@ -333,6 +333,17 @@ Two deviations from the issue text:
   `MaxSourcesTotalChars` (60 000). Each read gets `SourceTimeout` (20 s).
 - **Failures.** Every failure becomes a `SkillSourceReport.Error` (HTTP status, disallowed host,
   timeout, guide-tool error); a revision goes ahead with whatever could be read.
+- **Redirects.** Automatic redirects are off. Each hop is followed by hand and must again be https
+  on an allowed host, so an allowed source can't bounce the fetch elsewhere. The GitHub token is
+  only sent to `api.github.com`.
+- **Budget.** Everything rendered into the prompt counts against `MaxSourcesTotalChars`: headings,
+  text and the cut marker. Headings are capped at 200 characters, so long guide arguments can't
+  blow past the total. Once the budget is spent, the remaining guide calls, resources and change
+  notes are skipped before any request is made.
+- **Draft identity.** A hash of the source configuration is part of a draft's identity
+  (`SourcesSha256`, null when there are no sources). Adding or correcting sources therefore makes
+  earlier drafts, no-change markers and discard markers stale, so the next revision reads the new
+  material.
 
 ### Using them
 
