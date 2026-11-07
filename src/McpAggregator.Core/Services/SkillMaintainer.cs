@@ -277,7 +277,7 @@ public sealed partial class SkillMaintainer
         string serverName, SkillDraft stored, string current, SkillDrift? drift, CancellationToken ct)
     {
         if (stored.NoChanges)
-            return await AcceptUnchangedAsync(serverName, stored, current, drift, ct);
+            return await AcceptUnchangedAsync(serverName, stored, current, drift, ct, fromStored: true);
 
         if (!stored.ValidationPassed)
         {
@@ -326,18 +326,16 @@ public sealed partial class SkillMaintainer
     /// </summary>
     private async Task<bool> PublishAsync(string serverName, SkillDraft draft, CancellationToken ct)
     {
-        if (!await _skillStore.SetIfUnchangedAsync(serverName, draft.BasedOnSha256, draft.Markdown, ct))
+        // The baseline is recorded while the document lock is still held, so a save or restore that
+        // follows can't have its own baseline overwritten by this draft's.
+        if (!await _skillStore.SetIfUnchangedAsync(serverName, draft.BasedOnSha256, draft.Markdown,
+                () => RecordBaselineAsync(serverName, draft, ct), ct))
         {
             _skillStore.DeleteDraft(serverName);
             _logger.LogInformation("Did not publish skill revision for '{Server}': the document changed meanwhile", serverName);
             return false;
         }
 
-        await _registry.UpdateSkillFlagAsync(serverName, true, ct);
-        if (draft.Baseline is not null)
-            await SkillSnapshot.ApplyBaselineAsync(_registry, _toolIndex, serverName, draft.Baseline, ct);
-        else
-            await SkillSnapshot.CaptureAsync(_registry, _toolIndex, serverName, ct);
         _skillStore.DeleteDraft(serverName);
         _logger.LogInformation("Published revised skill for '{Server}'", serverName);
         return true;
@@ -350,24 +348,32 @@ public sealed partial class SkillMaintainer
     /// longer match its hash and is reported as a conflict instead.
     /// </summary>
     private async Task<SkillRefreshResult> AcceptUnchangedAsync(
-        string serverName, SkillDraft marker, string current, SkillDrift? drift, CancellationToken ct)
+        string serverName, SkillDraft marker, string current, SkillDrift? drift, CancellationToken ct, bool fromStored = false)
     {
-        var now = await _skillStore.GetAsync(serverName, ct);
-        if (now is null || SkillStore.ContentHash(now) != marker.BasedOnSha256)
+        // The hash check and the baseline update share the document's lock with every save and
+        // restore: if the text changed after the review, nothing is recorded.
+        if (!await _skillStore.RunIfUnchangedAsync(serverName, marker.BasedOnSha256,
+                () => RecordBaselineAsync(serverName, marker, ct), ct))
         {
             _skillStore.DeleteDraft(serverName);
             return Conflict(serverName, drift);
         }
 
-        if (marker.Baseline is not null)
-            await SkillSnapshot.ApplyBaselineAsync(_registry, _toolIndex, serverName, marker.Baseline, ct);
-        else
-            await SkillSnapshot.CaptureAsync(_registry, _toolIndex, serverName, ct);
         _skillStore.DeleteDraft(serverName);
         _logger.LogInformation("Recorded the unchanged skill for '{Server}' against {Version}", serverName, marker.ServerVersion);
         return WithDraft(Result("rebaselined",
             $"The model found nothing to change, so the skill document for '{serverName}' is now recorded against " +
-            $"{marker.ServerVersion ?? "the current server"} as it stands. The text is unchanged.", drift), marker, current);
+            $"{marker.ServerVersion ?? "the current server"} as it stands. The text is unchanged.", drift), marker, current, fromStored);
+    }
+
+    /// <summary>The catalog the draft was made from becomes the baseline (or, for old drafts without one, the live catalog).</summary>
+    private async Task RecordBaselineAsync(string serverName, SkillDraft draft, CancellationToken ct)
+    {
+        await _registry.UpdateSkillFlagAsync(serverName, true, ct);
+        if (draft.Baseline is not null)
+            await SkillSnapshot.ApplyBaselineAsync(_registry, _toolIndex, serverName, draft.Baseline, ct);
+        else
+            await SkillSnapshot.CaptureAsync(_registry, _toolIndex, serverName, ct);
     }
 
     private static SkillRefreshResult NoChangesResult(string serverName, SkillDrift? drift)
@@ -413,13 +419,14 @@ public sealed partial class SkillMaintainer
             document, StripProvenance(markdown), drift, omittedNames,
             catalog + "\n" + (server.RemoteInstructions ?? string.Empty), _options);
 
-        // The content checks run without the provenance line; the size limit applies to what is saved.
-        if (markdown.Length > SkillStore.MaxSkillSize)
-            problems.Add($"The draft with its provenance line is {markdown.Length} characters; the limit is {SkillStore.MaxSkillSize}.");
-
-        // The model kept the document as it is. Validation still has to pass: a document that still
-        // names a removed tool is wrong even if the model left it alone, and stays a failed draft.
+        // The model kept the document as it is. Content validation still has to pass: a document that
+        // still names a removed tool is wrong even if the model left it alone, and stays a failed draft.
         var noChanges = problems.Count == 0 && SameText(document, StripProvenance(markdown));
+
+        // The size limit applies to what would be saved: a revision carries the provenance line, a
+        // no-change marker keeps the current text, which is already within the limit.
+        if (!noChanges && markdown.Length > SkillStore.MaxSkillSize)
+            problems.Add($"The draft with its provenance line is {markdown.Length} characters; the limit is {SkillStore.MaxSkillSize}.");
 
         return new SkillDraft
         {

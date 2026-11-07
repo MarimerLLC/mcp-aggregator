@@ -466,6 +466,7 @@ public class SkillUpkeepTests
         var result = await rig.Maintainer.ApplyDraftAsync(Alpha, TestTimeout);
 
         Assert.AreEqual("rebaselined", result.Status, result.Message);
+        Assert.IsTrue(result.FromStoredDraft, "PR #64 review: the stored review was reused.");
         Assert.AreEqual(1, rig.Model.Requests.Count);
         Assert.AreEqual(Document, await rig.Skills.GetAsync(Alpha, TestTimeout));
         Assert.AreEqual(0, (await rig.Skills.ListHistoryAsync(Alpha, TestTimeout)).Count, "The text never changed.");
@@ -534,6 +535,38 @@ public class SkillUpkeepTests
 
         Assert.AreEqual("conflict", result.Status, result.Message);
         StringAssert.Contains(await rig.Skills.GetAsync(Alpha, TestTimeout), "Edited while the model looked.");
+        Assert.AreEqual("stale", (await rig.Harness.Index.GetDetailsAsync(Alpha, TestTimeout)).SkillFreshness,
+            "The reviewed catalog must not have been recorded as the baseline for a document nobody reviewed.");
+    }
+
+    [TestMethod]
+    public async Task GenerateAndApplyNoChanges_IsNotFromAStoredDraft()
+    {
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => Document;
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: true, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("rebaselined", result.Status, result.Message);
+        Assert.IsFalse(result.FromStoredDraft);
+    }
+
+    [TestMethod]
+    public async Task UnchangedDocumentNearTheSizeLimit_IsStillNoChanges()
+    {
+        // PR #64 review: the provenance line that would push it over the limit is never stored for a marker.
+        await using var rig = await CreateAsync(SkillMaintenanceMode.Propose);
+        var big = Document + new string('x', SkillStore.MaxSkillSize - Document.Length - 20) + "\n";
+        await AdminTools.UpdateSkill(rig.Harness.Registry, rig.Skills, rig.Harness.Index, Alpha, big, TestTimeout);
+        AddParameterOnly(rig.Harness);
+        rig.Model.Respond = _ => big;
+
+        var result = await rig.Maintainer.RefreshAsync(Alpha, apply: false, regenerate: false, TestTimeout);
+
+        Assert.AreEqual("no_changes", result.Status, string.Join(" | ", result.Problems));
+        Assert.IsTrue(result.ValidationPassed, "No size problem for text that would never be stored.");
+        Assert.AreEqual(0, result.Problems.Count, string.Join(" | ", result.Problems));
     }
 
     // ---------------------------------------------------------------- the running service
