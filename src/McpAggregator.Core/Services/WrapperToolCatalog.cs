@@ -241,8 +241,9 @@ public sealed class WrapperToolCatalog
 
     /// <summary>
     /// Builds (or reuses) the wrapper set for one server from the tool index. A wrapper instance is
-    /// reused when its name and schema fingerprint are unchanged so the tool collection is not
-    /// churned by a refresh that changed nothing.
+    /// reused when its name and fingerprint (the whole downstream definition, not just the input
+    /// schema; issue #52) are unchanged so the tool collection is not churned by a refresh that
+    /// changed nothing.
     /// </summary>
     public async Task<IReadOnlyList<DownstreamToolWrapper>> GetWrappersAsync(string serverName, CancellationToken ct = default)
     {
@@ -271,9 +272,9 @@ public sealed class WrapperToolCatalog
                 continue;
             }
 
-            var fingerprint = DownstreamToolWrapper.Fingerprint(tool.Protocol.InputSchema);
+            var fingerprint = DownstreamToolWrapper.ComputeFingerprint(tool.Protocol);
             if (previous.TryGetValue(name, out var reusable)
-                && string.Equals(reusable.SchemaFingerprint, fingerprint, StringComparison.Ordinal)
+                && string.Equals(reusable.Fingerprint, fingerprint, StringComparison.Ordinal)
                 && string.Equals(reusable.ServerId, server.Id, StringComparison.Ordinal))
             {
                 wrappers.Add(reusable);
@@ -315,7 +316,7 @@ public sealed class WrapperToolCatalog
 
     /// <summary>
     /// Builds (or reuses) the proxied prompt set for one server from the index. A wrapper instance
-    /// is reused when its name and argument fingerprint are unchanged so the prompt collection is
+    /// is reused when its name and definition fingerprint are unchanged so the prompt collection is
     /// not churned by a refresh that changed nothing. A server without prompt support yields an
     /// empty list.
     /// </summary>
@@ -346,9 +347,9 @@ public sealed class WrapperToolCatalog
                 continue;
             }
 
-            var fingerprint = DownstreamPromptWrapper.Fingerprint(prompt.Protocol);
+            var fingerprint = DownstreamPromptWrapper.ComputeFingerprint(prompt.Protocol);
             if (previous.TryGetValue(name, out var reusable)
-                && string.Equals(reusable.ArgumentsFingerprint, fingerprint, StringComparison.Ordinal)
+                && string.Equals(reusable.Fingerprint, fingerprint, StringComparison.Ordinal)
                 && string.Equals(reusable.ServerId, server.Id, StringComparison.Ordinal))
             {
                 wrappers.Add(reusable);
@@ -635,18 +636,26 @@ public sealed class WrapperToolCatalog
             return;
 
         var added = 0;
+        var refreshed = 0;
         foreach (var tool in tools)
         {
             if (state.Tools.TryAdd(tool.ProtocolTool.Name, tool))
+            {
                 added++;
-            else
-                state.Tools[tool.ProtocolTool.Name] = tool; // refreshed instance
+            }
+            else if (!state.Tools.TryGetValue(tool.ProtocolTool.Name, out var current) || !ReferenceEquals(current, tool))
+            {
+                // A rebuilt instance: the downstream definition changed (schema, description,
+                // annotations, ...), so the session must re-list to see it (issue #52).
+                state.Tools[tool.ProtocolTool.Name] = tool;
+                refreshed++;
+            }
         }
 
-        if (added == 0)
+        if (added == 0 && refreshed == 0)
             return;
 
-        _logger.LogInformation("Activated {Count} tool(s) for a session ({Total} active in it)", added, state.Tools.Count);
+        _logger.LogInformation("Activated {Count} tool(s) and refreshed {Refreshed} for a session ({Total} active in it)", added, refreshed, state.Tools.Count);
 
         try
         {
@@ -676,18 +685,26 @@ public sealed class WrapperToolCatalog
             return;
 
         var added = 0;
+        var refreshed = 0;
         foreach (var prompt in prompts)
         {
             if (state.Prompts.TryAdd(prompt.ProtocolPrompt.Name, prompt))
+            {
                 added++;
-            else
-                state.Prompts[prompt.ProtocolPrompt.Name] = prompt; // refreshed instance
+            }
+            else if (!state.Prompts.TryGetValue(prompt.ProtocolPrompt.Name, out var current) || !ReferenceEquals(current, prompt))
+            {
+                // A rebuilt instance: the downstream definition changed (schema, description,
+                // annotations, ...), so the session must re-list to see it (issue #52).
+                state.Prompts[prompt.ProtocolPrompt.Name] = prompt;
+                refreshed++;
+            }
         }
 
-        if (added == 0)
+        if (added == 0 && refreshed == 0)
             return;
 
-        _logger.LogInformation("Activated {Count} prompt(s) for a session ({Total} active in it)", added, state.Prompts.Count);
+        _logger.LogInformation("Activated {Count} prompt(s) and refreshed {Refreshed} for a session ({Total} active in it)", added, refreshed, state.Prompts.Count);
 
         try
         {
@@ -714,19 +731,27 @@ public sealed class WrapperToolCatalog
             return;
 
         var added = 0;
+        var refreshed = 0;
         foreach (var resource in resources)
         {
             var key = resource.ProtocolResourceTemplate.UriTemplate;
             if (state.Resources.TryAdd(key, resource))
+            {
                 added++;
-            else
-                state.Resources[key] = resource; // refreshed instance
+            }
+            else if (!state.Resources.TryGetValue(key, out var current) || !ReferenceEquals(current, resource))
+            {
+                // A rebuilt instance: the downstream definition changed (schema, description,
+                // annotations, ...), so the session must re-list to see it (issue #52).
+                state.Resources[key] = resource;
+                refreshed++;
+            }
         }
 
-        if (added == 0)
+        if (added == 0 && refreshed == 0)
             return;
 
-        _logger.LogInformation("Activated {Count} resource(s) for a session ({Total} active in it)", added, state.Resources.Count);
+        _logger.LogInformation("Activated {Count} resource(s) and refreshed {Refreshed} for a session ({Total} active in it)", added, refreshed, state.Resources.Count);
 
         try
         {
@@ -1149,9 +1174,9 @@ public sealed class WrapperToolCatalog
     private void OnToolsChanged(string serverName)
     {
         // The index has already dropped or replaced its entry; the next GetWrappersAsync re-reads
-        // it and reuses any wrapper whose name and schema are unchanged. Session activations that
-        // hold a stale instance are refreshed on the session's next find_tools/get_service_details
-        // or call; the shared collection is reconciled here.
+        // it and reuses any wrapper whose name and definition are unchanged. Session activations
+        // that hold a stale instance are refreshed (with a list_changed) on the session's next
+        // find_tools/get_service_details or call; the shared collection is reconciled here.
         ScheduleSync($"tools changed for '{serverName}'");
     }
 

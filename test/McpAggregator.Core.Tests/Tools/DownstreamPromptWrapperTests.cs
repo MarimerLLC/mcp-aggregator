@@ -1,6 +1,7 @@
 using SysDescription = System.ComponentModel.DescriptionAttribute;
 using System.Diagnostics.Metrics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using McpAggregator.Core;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Tests.Helpers;
@@ -168,8 +169,21 @@ public class DownstreamPromptWrapperTests
         var same = new Prompt { Name = "p", Arguments = [new PromptArgument { Name = "x", Required = true }] };
         var different = new Prompt { Name = "p", Arguments = [new PromptArgument { Name = "x", Required = false }] };
 
-        Assert.AreEqual(DownstreamPromptWrapper.Fingerprint(a), DownstreamPromptWrapper.Fingerprint(same));
-        Assert.AreNotEqual(DownstreamPromptWrapper.Fingerprint(a), DownstreamPromptWrapper.Fingerprint(different));
+        Assert.AreEqual(DownstreamPromptWrapper.ComputeFingerprint(a), DownstreamPromptWrapper.ComputeFingerprint(same));
+        Assert.AreNotEqual(DownstreamPromptWrapper.ComputeFingerprint(a), DownstreamPromptWrapper.ComputeFingerprint(different));
+    }
+
+    [TestMethod]
+    public void Fingerprint_ChangesWhenOnlyIconsOrMetaChange()
+    {
+        // Issue #52: every client-visible field counts, not just the arguments.
+        var baseline = DownstreamPromptWrapper.ComputeFingerprint(new Prompt { Name = "p", Description = "d" });
+
+        var withIcon = new Prompt { Name = "p", Description = "d", Icons = [new Icon { Source = "https://example.com/p.png" }] };
+        var withMeta = new Prompt { Name = "p", Description = "d", Meta = new JsonObject { ["v"] = 2 } };
+
+        Assert.AreNotEqual(baseline, DownstreamPromptWrapper.ComputeFingerprint(withIcon));
+        Assert.AreNotEqual(baseline, DownstreamPromptWrapper.ComputeFingerprint(withMeta));
     }
 
     // ---------------------------------------------------------------- round-trips

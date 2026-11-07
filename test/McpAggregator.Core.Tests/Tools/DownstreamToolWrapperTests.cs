@@ -168,6 +168,50 @@ public class DownstreamToolWrapperTests
         Assert.AreEqual(rig.Harness.Registry.Get(Downstream).Id, (string?)meta["serverId"]);
     }
 
+    // ---------------------------------------------------------------- fingerprint (issue #52)
+
+    private static Tool FingerprintTool(Action<Tool>? change = null)
+    {
+        var tool = new Tool
+        {
+            Name = "list_tasks",
+            Description = "Lists tasks.",
+            InputSchema = System.Text.Json.JsonDocument.Parse("""{"type":"object","properties":{"status":{"type":"string"}}}""").RootElement,
+        };
+        change?.Invoke(tool);
+        return tool;
+    }
+
+    [TestMethod]
+    public void Fingerprint_IsStableForAnIdenticalDefinition()
+    {
+        Assert.AreEqual(
+            DownstreamToolWrapper.ComputeFingerprint(FingerprintTool()),
+            DownstreamToolWrapper.ComputeFingerprint(FingerprintTool()));
+    }
+
+    [TestMethod]
+    public void Fingerprint_ChangesWhenAnyClientVisibleFieldChanges_EvenWithTheSameInputSchema()
+    {
+        var baseline = DownstreamToolWrapper.ComputeFingerprint(FingerprintTool());
+
+        var variants = new Dictionary<string, Action<Tool>>
+        {
+            ["annotations"] = t => t.Annotations = new ToolAnnotations { ReadOnlyHint = true },
+            ["description"] = t => t.Description = "Lists tasks. Deletes are recoverable.",
+            ["title"] = t => t.Title = "List tasks",
+            ["outputSchema"] = t => t.OutputSchema = System.Text.Json.JsonDocument.Parse("""{"type":"object"}""").RootElement,
+            ["icons"] = t => t.Icons = [new Icon { Source = "https://example.com/t.png" }],
+            ["_meta"] = t => t.Meta = new JsonObject { ["v"] = 2 },
+        };
+
+        foreach (var (field, change) in variants)
+        {
+            Assert.AreNotEqual(baseline, DownstreamToolWrapper.ComputeFingerprint(FingerprintTool(change)),
+                $"A change to {field} alone must change the fingerprint.");
+        }
+    }
+
     // ---------------------------------------------------------------- pre-flight
 
     [TestMethod]

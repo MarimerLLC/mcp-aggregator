@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Models;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -43,7 +44,7 @@ public sealed class DownstreamToolWrapper : McpServerTool
         ServerName = server.Name;
         ServerId = server.Id;
         ToolName = downstream.Name;
-        SchemaFingerprint = Fingerprint(downstream.InputSchema);
+        Fingerprint = ComputeFingerprint(downstream);
         _requiredKeys = RequiredKeys(downstream.InputSchema);
 
         var meta = downstream.Meta is { } existing
@@ -83,10 +84,12 @@ public sealed class DownstreamToolWrapper : McpServerTool
     public string ToolName { get; }
 
     /// <summary>
-    /// Hash of the downstream input schema. The catalog reuses a wrapper instance when the name and
-    /// fingerprint are unchanged so the tool collection is not churned on every refresh.
+    /// Hash of the downstream tool as it came over the wire: input and output schema, title,
+    /// description, annotations, icons and <c>_meta</c>. The catalog reuses a wrapper instance when
+    /// the name and fingerprint are unchanged so the tool collection is not churned on every
+    /// refresh, and rebuilds it when any client-visible field changed (issue #52).
     /// </summary>
-    public string SchemaFingerprint { get; }
+    public string Fingerprint { get; }
 
     public override async ValueTask<CallToolResult> InvokeAsync(
         RequestContext<CallToolRequestParams> request,
@@ -158,9 +161,10 @@ public sealed class DownstreamToolWrapper : McpServerTool
             : [];
     }
 
-    internal static string Fingerprint(JsonElement schema)
+    internal static string ComputeFingerprint(Tool tool)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(schema.GetRawText()));
+        var text = JsonSerializer.Serialize(tool, McpJsonUtilities.DefaultOptions);
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(text));
         return Convert.ToHexString(bytes.AsSpan(0, 8));
     }
 }
