@@ -21,6 +21,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SkillStore>();
         services.AddSingleton<ToolProxyHandler>();
         services.AddSingleton<SummaryGenerator>();
+        services.AddSingleton<SkillSourceReader>();
         services.AddSingleton<SkillMaintainer>();
         services.AddSingleton<SkillMaintenanceSignal>();
 

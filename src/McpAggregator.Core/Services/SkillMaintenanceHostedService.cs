@@ -170,8 +170,9 @@ public sealed class SkillMaintenanceHostedService : BackgroundService
 
         var apply = Mode == SkillMaintenanceMode.Auto;
 
-        // Nothing in the catalog to revise from: accept the document for the new version (no model call).
-        if (drift.CatalogUnchanged)
+        // Nothing in the catalog to revise from and no change sources to read: accept the document for
+        // the new version (no model call). With sources, the release notes may say what changed.
+        if (drift.CatalogUnchanged && !SkillMaintainer.HasSources(server))
             return !Succeeded(await RecordAsync(serverName, drift, () => _maintainer.RefreshAsync(serverName, apply: true, regenerate: false, ct)));
 
         // A draft for exactly this state already exists: never make another. Auto publishes it if it passed.

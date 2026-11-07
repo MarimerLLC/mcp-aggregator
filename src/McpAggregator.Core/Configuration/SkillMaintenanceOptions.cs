@@ -50,4 +50,23 @@ public class SkillMaintenanceOptions
     public double MaxLengthRatio { get; set; } = 2.5;
 
     public int MinLengthForRatioCheck { get; set; } = 400;
+
+    /// <summary>
+    /// Hosts change notes may be fetched from (exact match, https only; issue #59). GitHub locations
+    /// need <c>api.github.com</c> and, for folders, <c>raw.githubusercontent.com</c>. Configured values
+    /// are added to these defaults.
+    /// </summary>
+    public List<string> AllowedChangeNoteHosts { get; set; } = ["api.github.com", "raw.githubusercontent.com"];
+
+    /// <summary>Optional token for GitHub change notes in private repositories (keep it in a secret).</summary>
+    public string? GitHubToken { get; set; }
+
+    /// <summary>Characters taken from one change source (a file, a page, one guide call or resource).</summary>
+    public int MaxSourceChars { get; set; } = 20_000;
+
+    /// <summary>Characters taken from all change sources of one server together.</summary>
+    public int MaxSourcesTotalChars { get; set; } = 60_000;
+
+    /// <summary>How long reading one change source may take.</summary>
+    public TimeSpan SourceTimeout { get; set; } = TimeSpan.FromSeconds(20);
 }

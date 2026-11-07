@@ -179,6 +179,15 @@ public partial class ServerRegistry
     /// <see cref="RegisteredServer.Enabled"/>, <see cref="RegisteredServer.RegisteredAt"/>,
     /// the skill document flag and snapshot, the AI summary, and the captured remote metadata.
     /// </summary>
+    /// <summary>Replaces the server's skill change sources (issue #59); null or empty clears them.</summary>
+    public async Task UpdateSkillSourcesAsync(string name, SkillSources? sources, CancellationToken ct = default)
+    {
+        var server = Get(name);
+        server.SkillSources = sources is null || sources.IsEmpty ? null : sources;
+        await PersistAsync(ct);
+        _logger.LogInformation("Updated skill sources for '{Name}'", name);
+    }
+
     public async Task UpdateServerAsync(
         string name,
         TransportConfig? transport,

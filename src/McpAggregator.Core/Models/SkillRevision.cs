@@ -47,6 +47,9 @@ public class SkillDraft
     /// </summary>
     public SkillBaseline? Baseline { get; set; }
 
+    /// <summary>What was read from the server's change sources for this draft (issue #59).</summary>
+    public List<SkillSourceReport> Sources { get; set; } = [];
+
     public DateTimeOffset CreatedAt { get; set; }
     public string? Model { get; set; }
     public bool ValidationPassed { get; set; }
@@ -141,4 +144,7 @@ public class SkillRefreshResult
 
     /// <summary>The full proposed document.</summary>
     public string? Draft { get; set; }
+
+    /// <summary>What was read from the server's change sources (issue #59): one entry per file, page, guide call or resource.</summary>
+    public List<SkillSourceReport> Sources { get; set; } = [];
 }
