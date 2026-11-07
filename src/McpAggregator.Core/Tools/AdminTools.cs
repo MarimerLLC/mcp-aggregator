@@ -24,7 +24,7 @@ public class AdminTools
     public static readonly IReadOnlySet<string> ToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "register_server", "update_server", "unregister_server", "update_skill", "regenerate_summary",
-        "enable_service", "disable_service",
+        "enable_service", "disable_service", "refresh_skill", "list_skill_history", "restore_skill",
     };
 
     /// <summary>Name and description of every tool declared here, in declaration order.</summary>
@@ -253,6 +253,60 @@ public class AdminTools
         return baselineRecorded
             ? $"Skill document updated for '{serverName}'."
             : $"Skill document updated for '{serverName}'. {SkillSnapshot.NoBaselineNote}";
+    }
+
+    [McpServerTool(Name = "refresh_skill")]
+    [Description("Revise a stale skill document with the aggregator's model: it proposes a minimal edit for what changed on the server (see skillDrift in get_service_details), checks it, and returns the draft, a diff and any validation problems. Nothing is saved unless apply is true. With apply: true the reviewed draft from the previous call is published as is (pass regenerate: true for a new one); without a stored draft, a new one is generated and published if it passes validation. The replaced version goes to history (list_skill_history, restore_skill). When only the server's version changed, apply: true records the document against the new version without calling the model.")]
+    public static async Task<string> RefreshSkill(
+        SkillMaintainer maintainer,
+        [Description("The name of the registered server")] string serverName,
+        [Description("Publish the draft. Default false: propose only.")] bool apply = false,
+        [Description("Ignore a stored draft and ask the model for a new one.")] bool regenerate = false,
+        CancellationToken ct = default)
+    {
+        var result = await maintainer.RefreshAsync(serverName, apply, regenerate, ct);
+        return JsonSerializer.Serialize(result, SkillMaintainer.ResultJson);
+    }
+
+    [McpServerTool(Name = "list_skill_history")]
+    [Description("List the replaced versions of a server's skill document, newest first, with the server version each was written for. Pass a version to restore_skill to bring it back.")]
+    public static async Task<string> ListSkillHistory(
+        ServerRegistry registry,
+        SkillStore skillStore,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        registry.Get(serverName); // Validate server exists
+        var history = await skillStore.ListHistoryAsync(serverName, ct);
+        return JsonSerializer.Serialize(history, SkillMaintainer.ResultJson);
+    }
+
+    [McpServerTool(Name = "restore_skill")]
+    [Description("Restore an earlier version of a server's skill document (a version from list_skill_history). The current document goes to history first. The restored version is judged against the catalog it was written for, so it may read stale.")]
+    public static async Task<string> RestoreSkill(
+        ServerRegistry registry,
+        SkillStore skillStore,
+        ToolIndex toolIndex,
+        [Description("The name of the registered server")] string serverName,
+        [Description("The version to restore, as list_skill_history shows it")] string version,
+        CancellationToken ct)
+    {
+        await registry.EnsureLoadedAsync(ct);
+        registry.Get(serverName); // Validate server exists
+        var entry = await skillStore.GetHistoryAsync(serverName, version, ct);
+        if (entry is null)
+            return $"No version '{version}' in the skill history for '{serverName}'. Call list_skill_history for the versions.";
+
+        var (markdown, baseline) = entry.Value;
+        await skillStore.SetAsync(serverName, markdown, ct);
+        await registry.UpdateSkillFlagAsync(serverName, true, ct);
+        await SkillSnapshot.ApplyBaselineAsync(registry, toolIndex, serverName, baseline, ct);
+        skillStore.DeleteDraft(serverName);
+
+        return baseline is null
+            ? $"Restored version '{version}' of the skill document for '{serverName}'. It was kept without a baseline, so its freshness is unknown until the document is saved again with update_skill."
+            : $"Restored version '{version}' of the skill document for '{serverName}', written for {baseline.RemoteVersion ?? "an unknown version"}.";
     }
 
     private static async Task<string?> GenerateSummaryForServerAsync(

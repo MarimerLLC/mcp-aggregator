@@ -17,7 +17,7 @@ Every downstream tool is available as a **typed tool named `{server}__{tool}`** 
 3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas, prompt templates (each with its `wrapperName`) and resources (each with its `uri`) and, in `Lazy` mode, makes that server's typed tools, prompts and resources callable.
 4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
 5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt(serverName, promptName, arguments)` the same way for prompt templates when your client has no prompt support, and `read_resource(serverName, uri)` for resources when it has no resource support.
-6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
+6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `refresh_skill`, `list_skill_history`, `restore_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
 7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
 **Client capability.** The aggregator sends `tools/list_changed` to your session when typed tools are activated, and the SDK-level clients re-fetch `tools/list`. Whether *you* can then call the new names depends on your client. Some clients build their tool index once per conversation and reject any name outside it before the call reaches the aggregator; Claude Desktop chat (September 2026, via `mcp-remote`) behaves this way, so a typed tool activated during a conversation fails there with a client-side "not found" even though the aggregator listed it. If that happens, do not retry the typed name in that conversation: call `invoke_tool` with the same arguments. The typed tools are already in the session's list and should be callable at the start of your next conversation. Clients that honor `list_changed` mid-conversation can call the typed tools immediately.
@@ -46,6 +46,9 @@ The same discovery data is available via the REST API. Start with `GET /api` to 
 | `update_server` | `PUT /api/admin/services/{name}` | Update a server's transport configuration or metadata |
 | `unregister_server` | `DELETE /api/admin/services/{name}` | Remove a registered server |
 | `update_skill` | `PUT /api/admin/services/{name}/skill` | Set or update a server's skill document |
+| `refresh_skill` | — | Have the aggregator's model propose (and with `apply: true` publish) a revision of a stale skill document |
+| `list_skill_history` | — | List the replaced versions of a server's skill document |
+| `restore_skill` | — | Restore an earlier version of a server's skill document |
 | `regenerate_summary` | `POST /api/admin/services/{name}/regenerate-summary` | Re-generate the AI summary for a server |
 
 The REST API entry point is `GET /api`, which returns aggregator info and links to all endpoints.
@@ -266,6 +269,17 @@ Each update replaces the full document, so fetch the current content with `get_s
 Saving a skill records the server's version, instructions, tools and prompts at that moment. When the server later changes, `list_services` and `get_service_details` report `skillFreshness: "stale"`. `get_service_details` also includes `skillDrift`: tools and prompts added, removed or changed, which parameters, and whether the version or instructions changed.
 
 `get_service_skill` then starts the document with a quoted notice between `<!-- aggregator:skill-notice -->` markers, listing what changed. Where the document and the live schemas disagree, follow the schemas. A stale skill is also a good moment to fix the document: update the parts the changes affect and save it with `update_skill`. You can save the text exactly as `get_service_skill` returned it; the notice is stripped on save, and saving records a new baseline.
+
+#### Revising a stale skill with `refresh_skill`
+
+If the aggregator has a model configured, `refresh_skill(serverName)` drafts the revision for you: a minimal edit of the current document for what changed. The result has `status`, the `draft`, a `diff`, `validationPassed` and any `problems`. Mechanical checks catch a removed tool still named, a new tool neither documented nor listed as left out, a large change in length, and URLs or email addresses that aren't in the current document or the server's catalog. Nothing is saved yet.
+
+1. Read the `diff`. If it looks right, call `refresh_skill(serverName, apply: true)`. That publishes exactly the draft you reviewed, without asking the model again.
+2. If it needs work, edit the `draft` yourself and save it with `update_skill`, or ask for a new draft with `regenerate: true`.
+3. `status: "version_only"` means only the server's version changed. There is nothing to revise, and `apply: true` records the document against the new version.
+4. `status: "unavailable"` means no model is configured. Use `skillDrift` and edit by hand.
+
+Every save, by hand or by `refresh_skill`, keeps the replaced version. `list_skill_history(serverName)` lists them, and `restore_skill(serverName, version)` brings one back.
 
 ### Regenerating Summaries
 

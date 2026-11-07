@@ -12,6 +12,7 @@ public static class ServiceCollectionExtensions
     {
         services.Configure<AggregatorOptions>(configuration.GetSection(AggregatorOptions.SectionName));
         services.Configure<AiOptions>(configuration.GetSection(AiOptions.SectionName));
+        services.Configure<SkillMaintenanceOptions>(configuration.GetSection(SkillMaintenanceOptions.SectionName));
 
         services.AddSingleton<IRegistryPersistence, JsonFilePersistence>();
         services.AddSingleton<ServerRegistry>();
@@ -20,6 +21,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SkillStore>();
         services.AddSingleton<ToolProxyHandler>();
         services.AddSingleton<SummaryGenerator>();
+        services.AddSingleton<SkillMaintainer>();
 
         services.AddHostedService<IdleConnectionCleanupService>();
 

@@ -332,7 +332,7 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "show_admin_tools")]
-    [Description("Add the aggregator's administrative tools to your tool list: register_server, update_server, unregister_server, update_skill, regenerate_summary, enable_service, disable_service. They are hidden by default so ordinary sessions do not carry them. They can also be called by name without this step.")]
+    [Description("Add the aggregator's administrative tools to your tool list: register_server, update_server, unregister_server, update_skill, refresh_skill, list_skill_history, restore_skill, regenerate_summary, enable_service, disable_service. They are hidden by default so ordinary sessions do not carry them. They can also be called by name without this step.")]
     public static async Task<string> ShowAdminTools(
         WrapperToolCatalog catalog,
         McpServer server,

@@ -56,4 +56,35 @@ public static class SkillSnapshot
             ct);
         return true;
     }
+
+    /// <summary>
+    /// Makes <paramref name="baseline"/> the current baseline without reading the server: used by
+    /// <c>restore_skill</c> (issue #57), so a restored version is judged against the catalog it was
+    /// actually written for. The fingerprint is recomputed from the stored catalog. A null baseline
+    /// (a version kept without one) clears the snapshot, so freshness reads <c>unknown</c> rather
+    /// than claiming a match nobody checked.
+    /// </summary>
+    public static async Task ApplyBaselineAsync(
+        ServerRegistry registry,
+        ToolIndex toolIndex,
+        string serverName,
+        SkillBaseline? baseline,
+        CancellationToken ct)
+    {
+        if (baseline is null)
+        {
+            await toolIndex.SaveSkillBaselineAsync(serverName, null, ct);
+            await registry.UpdateSkillSnapshotAsync(serverName, null, null, null, ct);
+            return;
+        }
+
+        var (tools, prompts) = baseline.ToDetails();
+        await toolIndex.SaveSkillBaselineAsync(serverName, baseline, ct);
+        await registry.UpdateSkillSnapshotAsync(
+            serverName,
+            baseline.RemoteVersion,
+            SkillFingerprint.Compute(tools, prompts),
+            baseline.RecordedAt,
+            ct);
+    }
 }

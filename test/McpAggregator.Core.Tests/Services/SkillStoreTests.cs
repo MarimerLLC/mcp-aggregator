@@ -182,4 +182,97 @@ public class SkillStoreTests
 
         Assert.IsNull(await store.GetBaselineAsync("svc"));
     }
+
+    // --- History and drafts (issue #57) ---
+
+    private SkillStore CreateStore(int historyLimit) => new(
+        TestHelpers.OptionsOf(new AggregatorOptions { DataDirectory = _tempDir, SkillsDirectory = "skills", SkillHistoryLimit = historyLimit }),
+        TestHelpers.NullLoggerOf<SkillStore>());
+
+    [TestMethod]
+    public async Task SetAsync_KeepsReplacedVersionsWithTheirBaseline()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "v1");
+        await store.SetBaselineAsync("svc", new McpAggregator.Core.Models.SkillBaseline { RemoteVersion = "1.0" });
+        await store.SetAsync("svc", "v2");
+
+        var entry = (await store.ListHistoryAsync("svc")).Single();
+        var (markdown, baseline) = (await store.GetHistoryAsync("svc", entry.Version))!.Value;
+
+        Assert.AreEqual("v1", markdown);
+        Assert.AreEqual("1.0", baseline?.RemoteVersion);
+        Assert.AreEqual("1.0", entry.RecordedVersion);
+        Assert.IsNotNull(entry.ReplacedAt);
+    }
+
+    [TestMethod]
+    public async Task SetAsync_IdenticalText_KeepsNoHistory()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "same");
+        await store.SetAsync("svc", "same");
+
+        Assert.AreEqual(0, (await store.ListHistoryAsync("svc")).Count);
+    }
+
+    [TestMethod]
+    public async Task SetAsync_TrimsHistoryToTheLimit()
+    {
+        var store = CreateStore(historyLimit: 3);
+        for (var i = 1; i <= 6; i++)
+            await store.SetAsync("svc", $"v{i}");
+
+        var history = await store.ListHistoryAsync("svc");
+
+        Assert.AreEqual(3, history.Count);
+        Assert.AreEqual("v5", (await store.GetHistoryAsync("svc", history[0].Version))!.Value.Markdown, "Newest first.");
+    }
+
+    [TestMethod]
+    public async Task Delete_RemovesHistoryAndDraft()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "v1");
+        await store.SetAsync("svc", "v2");
+        await store.SetDraftAsync("svc", new McpAggregator.Core.Models.SkillDraft { Markdown = "d", BasedOnSha256 = "x" });
+
+        store.Delete("svc");
+
+        Assert.AreEqual(0, (await store.ListHistoryAsync("svc")).Count);
+        Assert.IsNull(await store.GetDraftAsync("svc"));
+    }
+
+    [TestMethod]
+    public async Task SetAsync_ConcurrentSaves_ArchiveEveryReplacedVersion()
+    {
+        // PR #61 review: two saves must not both archive the same predecessor and lose the one in between.
+        var store = CreateStore(historyLimit: 50);
+        await store.SetAsync("svc", "v0");
+
+        await Task.WhenAll(Enumerable.Range(1, 10).Select(i => Task.Run(() => store.SetAsync("svc", $"v{i}"))));
+
+        var history = await store.ListHistoryAsync("svc");
+        var archived = new List<string>();
+        foreach (var entry in history)
+            archived.Add((await store.GetHistoryAsync("svc", entry.Version))!.Value.Markdown);
+        var current = await store.GetAsync("svc");
+        CollectionAssert.AreEquivalent(
+            Enumerable.Range(0, 11).Select(i => $"v{i}").Where(v => v != current).ToList(), archived,
+            "Every version but the current one must be in history exactly once.");
+    }
+
+    [TestMethod]
+    public async Task SetIfUnchangedAsync_RefusesWhenTheDocumentChanged()
+    {
+        var store = CreateStore();
+        await store.SetAsync("svc", "original");
+        var hash = SkillStore.ContentHash("original");
+        await store.SetAsync("svc", "someone else's edit");
+
+        Assert.IsFalse(await store.SetIfUnchangedAsync("svc", hash, "draft"));
+        Assert.AreEqual("someone else's edit", await store.GetAsync("svc"));
+        Assert.IsTrue(await store.SetIfUnchangedAsync("svc", SkillStore.ContentHash("someone else's edit"), "draft"));
+        Assert.AreEqual("draft", await store.GetAsync("svc"));
+    }
 }

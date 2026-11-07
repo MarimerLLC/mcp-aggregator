@@ -11,6 +11,9 @@ public class AggregatorOptions
     public TimeSpan ConnectionIdleTimeout { get; set; } = TimeSpan.FromMinutes(30);
     public TimeSpan DefaultToolTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>Replaced skill-document versions kept per server for <c>restore_skill</c> (issue #57); 0 keeps none.</summary>
+    public int SkillHistoryLimit { get; set; } = 20;
+
     /// <summary>
     /// When downstream tools are exposed as typed wrapper tools in the aggregator's own tool list.
     /// Defaults to <see cref="WrapperToolMode.Lazy"/> on both hosts: the tool list stays minimal
