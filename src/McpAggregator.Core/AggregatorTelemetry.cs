@@ -55,4 +55,24 @@ public static class AggregatorTelemetry
     /// <summary>Currently active downstream connections; tags: server_name</summary>
     public static readonly UpDownCounter<long> ActiveConnections =
         Meter.CreateUpDownCounter<long>("mcp_active_connections", description: "Number of active downstream MCP server connections");
+
+    /// <summary>
+    /// Skill revisions by the background upkeep (issue #58); tags: server_name, mode (propose|auto),
+    /// outcome (proposed|applied|rejected|rebaselined|conflict|failed).
+    /// </summary>
+    public static readonly Counter<long> SkillRevisions =
+        Meter.CreateCounter<long>("mcp_skill_revisions_total", description: "Skill document revisions made by the background upkeep");
+
+    private static int _staleSkills;
+
+    /// <summary>Stale skills found by the last background check; set by <c>SkillMaintenanceHostedService</c>.</summary>
+    public static int StaleSkills
+    {
+        get => Volatile.Read(ref _staleSkills);
+        set => Volatile.Write(ref _staleSkills, value);
+    }
+
+    /// <summary>Skill documents the last background check found stale.</summary>
+    public static readonly ObservableGauge<int> StaleSkillServers =
+        Meter.CreateObservableGauge("mcp_skill_stale_servers", () => StaleSkills, description: "Skill documents found stale by the last background check");
 }

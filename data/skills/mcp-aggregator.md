@@ -17,7 +17,7 @@ Every downstream tool is available as a **typed tool named `{server}__{tool}`** 
 3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas, prompt templates (each with its `wrapperName`) and resources (each with its `uri`) and, in `Lazy` mode, makes that server's typed tools, prompts and resources callable.
 4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
 5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt(serverName, promptName, arguments)` the same way for prompt templates when your client has no prompt support, and `read_resource(serverName, uri)` for resources when it has no resource support.
-6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `refresh_skill`, `list_skill_history`, `restore_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
+6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `refresh_skill`, `list_skill_drafts`, `apply_skill_draft`, `discard_skill_draft`, `list_skill_history`, `restore_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
 7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
 **Client capability.** The aggregator sends `tools/list_changed` to your session when typed tools are activated, and the SDK-level clients re-fetch `tools/list`. Whether *you* can then call the new names depends on your client. Some clients build their tool index once per conversation and reject any name outside it before the call reaches the aggregator; Claude Desktop chat (September 2026, via `mcp-remote`) behaves this way, so a typed tool activated during a conversation fails there with a client-side "not found" even though the aggregator listed it. If that happens, do not retry the typed name in that conversation: call `invoke_tool` with the same arguments. The typed tools are already in the session's list and should be callable at the start of your next conversation. Clients that honor `list_changed` mid-conversation can call the typed tools immediately.
@@ -49,6 +49,9 @@ The same discovery data is available via the REST API. Start with `GET /api` to 
 | `refresh_skill` | — | Have the aggregator's model propose (and with `apply: true` publish) a revision of a stale skill document |
 | `list_skill_history` | — | List the replaced versions of a server's skill document |
 | `restore_skill` | — | Restore an earlier version of a server's skill document |
+| `list_skill_drafts` | — | List revised skill drafts waiting for review; with `serverName`, the draft text and diff |
+| `apply_skill_draft` | — | Publish a server's waiting draft exactly as stored (never calls the model) |
+| `discard_skill_draft` | — | Discard a server's waiting draft |
 | `regenerate_summary` | `POST /api/admin/services/{name}/regenerate-summary` | Re-generate the AI summary for a server |
 
 The REST API entry point is `GET /api`, which returns aggregator info and links to all endpoints.
@@ -280,6 +283,17 @@ If the aggregator has a model configured, `refresh_skill(serverName)` drafts the
 4. `status: "unavailable"` means no model is configured. Use `skillDrift` and edit by hand.
 
 Every save, by hand or by `refresh_skill`, keeps the replaced version. `list_skill_history(serverName)` lists them, and `restore_skill(serverName, version)` brings one back.
+
+#### Drafts waiting for review
+
+The aggregator may also draft revisions on its own: its background upkeep can run in `Propose` mode. The stale notice then says *"A revised draft of this document … is waiting for review"*.
+
+- `list_skill_drafts` lists every waiting draft, with `validationPassed`, `problems` and `current` (whether it still fits the document and server).
+- `list_skill_drafts(serverName)` adds the draft text and its `diff`.
+- `apply_skill_draft(serverName)` publishes it exactly as stored. It is refused if the draft failed validation or the document or server changed since (`obsolete`).
+- `discard_skill_draft(serverName)` drops it. The upkeep won't draft again until the document or server changes, but `refresh_skill` can still make one on request.
+
+`refresh_skill(serverName)` also returns a waiting draft that still fits instead of asking the model again; pass `regenerate: true` for a new one.
 
 ### Regenerating Summaries
 

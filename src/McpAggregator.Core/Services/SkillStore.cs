@@ -232,6 +232,16 @@ public class SkillStore
 
     public bool DeleteDraft(string serverName) => DeleteFile(GetDraftPath(serverName));
 
+    /// <summary>Servers with a stored draft, by name.</summary>
+    public List<string> ListDraftServers()
+    {
+        var dir = Path.Combine(_skillsDir, "drafts");
+        return Directory.Exists(dir)
+            ? Directory.GetFiles(dir, "*.json").Select(Path.GetFileNameWithoutExtension).OfType<string>()
+                .Order(StringComparer.OrdinalIgnoreCase).ToList()
+            : [];
+    }
+
     // ---------------------------------------------------------------- plumbing
 
     private async Task<T?> ReadJsonAsync<T>(string path, string serverName, string what, CancellationToken ct)

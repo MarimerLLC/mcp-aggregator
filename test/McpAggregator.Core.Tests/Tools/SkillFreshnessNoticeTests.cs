@@ -64,7 +64,8 @@ public class SkillFreshnessNoticeTests
     }
 
     private static Task<string> GetSkillAsync(WrapperHarness harness, SkillStore skills)
-        => ConsumerTools.GetServiceSkill(skills, harness.Registry, harness.Index, Server, TestTimeout);
+        => ConsumerTools.GetServiceSkill(skills, harness.Registry, harness.Index,
+            TestHelpers.OptionsOf(new SkillMaintenanceOptions()), Server, TestTimeout);
 
     /// <summary>Upgrades the downstream in place: <c>create_event</c> gains <c>isAllDay</c>, <c>list_accounts</c> goes away.</summary>
     private static void UpgradeDownstream(WrapperHarness harness)

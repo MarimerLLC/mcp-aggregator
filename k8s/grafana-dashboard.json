@@ -1273,6 +1273,185 @@
         "x": 0,
         "y": 40
       },
+      "id": 70,
+      "title": "Skill Maintenance",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 25
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 41
+      },
+      "id": 71,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "expr": "max(mcp_skill_stale_servers{job=\"mcp-aggregator\"})",
+          "instant": true,
+          "legendFormat": "stale",
+          "refId": "A"
+        }
+      ],
+      "title": "Stale Skill Documents",
+      "type": "stat",
+      "description": "Skill documents the last background check found stale (mcp_skill_stale_servers)."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "description": "Background skill upkeep: drafts proposed, published, rejected by validation, re-baselined, conflicts and failures (mcp_skill_revisions_total).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 6,
+        "y": 41
+      },
+      "id": 72,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(mcp_skill_revisions_total{job=\"mcp-aggregator\", server_name=~\"$server_name\"}[1h]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Skill Revisions by Outcome (per hour)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
       "id": 40,
       "panels": [],
       "title": "HTTP Traffic (Aggregator Endpoint)",
@@ -1345,7 +1524,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 41
+        "y": 50
       },
       "id": 41,
       "options": {
@@ -1438,7 +1617,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 41
+        "y": 50
       },
       "id": 42,
       "options": {
@@ -1541,7 +1720,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 58
       },
       "id": 43,
       "options": {
@@ -1634,7 +1813,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 58
       },
       "id": 44,
       "options": {
@@ -1667,7 +1846,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 66
       },
       "id": 50,
       "panels": [],
@@ -1688,7 +1867,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 67
       },
       "id": 51,
       "options": {
@@ -1719,7 +1898,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 77
       },
       "id": 60,
       "panels": [],
@@ -1744,7 +1923,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 69
+        "y": 78
       },
       "id": 61,
       "options": {
@@ -1785,7 +1964,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 69
+        "y": 78
       },
       "id": 62,
       "options": {
@@ -1820,7 +1999,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 77
+        "y": 86
       },
       "id": 63,
       "options": {

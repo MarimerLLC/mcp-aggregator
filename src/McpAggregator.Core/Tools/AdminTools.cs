@@ -25,6 +25,7 @@ public class AdminTools
     {
         "register_server", "update_server", "unregister_server", "update_skill", "regenerate_summary",
         "enable_service", "disable_service", "refresh_skill", "list_skill_history", "restore_skill",
+        "list_skill_drafts", "apply_skill_draft", "discard_skill_draft",
     };
 
     /// <summary>Name and description of every tool declared here, in declaration order.</summary>
@@ -267,6 +268,38 @@ public class AdminTools
         var result = await maintainer.RefreshAsync(serverName, apply, regenerate, ct);
         return JsonSerializer.Serialize(result, SkillMaintainer.ResultJson);
     }
+
+    [McpServerTool(Name = "list_skill_drafts")]
+    [Description("List revised skill-document drafts waiting for review (made by refresh_skill or by the background upkeep in Propose mode), with whether each passed validation and still fits the current document and server. Pass serverName to get that draft's full text and its diff against the current document.")]
+    public static async Task<string> ListSkillDrafts(
+        SkillMaintainer maintainer,
+        [Description("Optional: one server, to include the draft text and diff")] string? serverName = null,
+        CancellationToken ct = default)
+    {
+        var drafts = await maintainer.ListDraftsAsync(serverName, ct);
+        return JsonSerializer.Serialize(drafts, SkillMaintainer.ResultJson);
+    }
+
+    [McpServerTool(Name = "apply_skill_draft")]
+    [Description("Publish the waiting skill-document draft for a server exactly as stored (see list_skill_drafts). Never calls the model. Refused when the draft failed validation or was made for an earlier version of the document or server. The replaced version goes to history.")]
+    public static async Task<string> ApplySkillDraft(
+        SkillMaintainer maintainer,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct = default)
+    {
+        var result = await maintainer.ApplyDraftAsync(serverName, ct);
+        return JsonSerializer.Serialize(result, SkillMaintainer.ResultJson);
+    }
+
+    [McpServerTool(Name = "discard_skill_draft")]
+    [Description("Discard the waiting skill-document draft for a server. The background upkeep won't draft again until the document or the server changes; refresh_skill can still make a new one on request.")]
+    public static async Task<string> DiscardSkillDraft(
+        SkillMaintainer maintainer,
+        [Description("The name of the registered server")] string serverName,
+        CancellationToken ct = default)
+        => await maintainer.DiscardDraftAsync(serverName, ct)
+            ? $"Discarded the skill-document draft for '{serverName}'."
+            : $"No draft was waiting for '{serverName}'.";
 
     [McpServerTool(Name = "list_skill_history")]
     [Description("List the replaced versions of a server's skill document, newest first, with the server version each was written for. Pass a version to restore_skill to bring it back.")]

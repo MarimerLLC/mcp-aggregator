@@ -55,9 +55,9 @@ public sealed partial class SkillMaintainer
 
     /// <summary>
     /// Proposes (and with <paramref name="apply"/> publishes) a revision of a stale skill document.
-    /// With <paramref name="apply"/> and without <paramref name="regenerate"/>, a stored draft that
-    /// still revises the current document and server version is published as is, without calling
-    /// the model, so what gets saved is what was reviewed.
+    /// Without <paramref name="regenerate"/>, a stored draft that still revises the current document
+    /// for the current server state is used instead of calling the model: returned as the proposal,
+    /// or with <paramref name="apply"/> published as is, so what gets saved is what was reviewed.
     /// </summary>
     public async Task<SkillRefreshResult> RefreshAsync(
         string serverName, bool apply, bool regenerate, CancellationToken ct = default)
@@ -97,36 +97,20 @@ public sealed partial class SkillMaintainer
                 : Result("failed", $"'{serverName}' could not be read to record a baseline. {SkillSnapshot.NoBaselineNote}", drift);
         }
 
-        var currentHash = SkillStore.ContentHash(current);
-        var tools = await _toolIndex.GetToolsForServerAsync(serverName, ct);
-        var prompts = await _toolIndex.GetPromptsForServerAsync(serverName, ct);
-        var catalogFingerprint = SkillFingerprint.Compute(tools, prompts);
-        var instructionsHash = SkillStore.ContentHash(server.RemoteInstructions ?? string.Empty);
+        var state = await StateAsync(server, current, ct);
 
-        if (apply && !regenerate)
+        var stored = regenerate ? null : await _skillStore.GetDraftAsync(serverName, ct);
+        if (stored is not null && !stored.Discarded && state.Matches(stored))
         {
-            // Reused only while it still revises this document for this exact server state: the
-            // catalog and instructions can change without a version bump.
-            var stored = await _skillStore.GetDraftAsync(serverName, ct);
-            if (stored is not null
-                && stored.BasedOnSha256 == currentHash
-                && stored.ServerVersion == server.RemoteVersion
-                && stored.CatalogFingerprint == catalogFingerprint
-                && stored.InstructionsSha256 == instructionsHash)
+            if (!apply)
             {
-                if (!stored.ValidationPassed)
-                {
-                    return WithDraft(Result("rejected",
-                        "The stored draft failed validation, so it was not published. Fix the document by hand with update_skill, " +
-                        "or call refresh_skill with regenerate: true for a new draft.", drift), stored, current);
-                }
-
-                if (!await PublishAsync(serverName, stored, ct))
-                    return Conflict(serverName, drift);
-                return WithDraft(Result("applied",
-                    $"Published the reviewed draft for '{serverName}' (from {stored.CreatedAt:u}). The previous version is in history; restore_skill can bring it back.",
+                return WithDraft(Result("proposed", stored.ValidationPassed
+                    ? "This draft was prepared earlier and still fits the current document and server. Call refresh_skill with apply: true (or apply_skill_draft) to publish exactly this draft, or regenerate: true for a new one."
+                    : "This draft was prepared earlier and failed validation; see problems. Edit the document by hand with update_skill, or call refresh_skill with regenerate: true.",
                     drift), stored, current, fromStored: true);
             }
+
+            return await ApplyStoredAsync(serverName, stored, current, drift, ct);
         }
 
         if (!IsAvailable)
@@ -139,7 +123,7 @@ public sealed partial class SkillMaintainer
         SkillDraft draft;
         try
         {
-            draft = await GenerateAsync(server, current, currentHash, drift, tools, prompts, ct);
+            draft = await GenerateAsync(server, current, state.DocumentHash, drift, state.Tools, state.Prompts, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -174,6 +158,151 @@ public sealed partial class SkillMaintainer
     }
 
     /// <summary>
+    /// Publishes the stored draft for <paramref name="serverName"/> (<c>apply_skill_draft</c>, issue #58)
+    /// without ever calling the model: <c>no_draft</c> when there is none, <c>obsolete</c> when it
+    /// was made for an earlier document or server state, <c>rejected</c> when it failed validation,
+    /// otherwise <c>applied</c> (or <c>conflict</c> if the document is saved concurrently).
+    /// </summary>
+    public async Task<SkillRefreshResult> ApplyDraftAsync(string serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var server = _registry.Get(serverName);
+        var stored = await _skillStore.GetDraftAsync(serverName, ct);
+        var current = await _skillStore.GetAsync(serverName, ct);
+        if (stored is null || stored.Discarded || current is null)
+            return Result("no_draft", $"No draft is waiting for '{serverName}'. refresh_skill makes one.");
+
+        var (_, drift) = await _toolIndex.GetSkillStatusAsync(serverName, ct);
+        var state = await StateAsync(server, current, ct);
+        if (!state.Matches(stored))
+        {
+            return WithDraft(Result("obsolete",
+                $"The draft for '{serverName}' was made for an earlier version of the document or of the server, so it was not published. " +
+                "Call refresh_skill for a new draft, or discard_skill_draft.", drift), stored, current);
+        }
+
+        return await ApplyStoredAsync(serverName, stored, current, drift, ct);
+    }
+
+    /// <summary>The stored draft for <paramref name="serverName"/> if it still fits the current document and server state, else null.</summary>
+    public async Task<SkillDraft?> GetCurrentDraftAsync(string serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var server = _registry.Get(serverName);
+        var stored = await _skillStore.GetDraftAsync(serverName, ct);
+        var current = await _skillStore.GetAsync(serverName, ct);
+        if (stored is null || current is null)
+            return null;
+        return (await StateAsync(server, current, ct)).Matches(stored) ? stored : null;
+    }
+
+    /// <summary>
+    /// Marks the stored draft discarded (issue #58). It stays on disk as a marker so the background
+    /// upkeep doesn't draft again for the same state; returns false when no draft was waiting.
+    /// </summary>
+    public async Task<bool> DiscardDraftAsync(string serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        _registry.Get(serverName); // Validate server exists
+        var stored = await _skillStore.GetDraftAsync(serverName, ct);
+        if (stored is null || stored.Discarded)
+            return false;
+
+        stored.Discarded = true;
+        await _skillStore.SetDraftAsync(serverName, stored, ct);
+        _logger.LogInformation("Discarded skill draft for '{Server}'", serverName);
+        return true;
+    }
+
+    /// <summary>
+    /// Every stored draft with whether it still fits (issue #58). <paramref name="serverName"/> narrows
+    /// it to one server and adds the draft text and diff.
+    /// </summary>
+    public async Task<List<SkillDraftSummary>> ListDraftsAsync(string? serverName, CancellationToken ct = default)
+    {
+        await _registry.EnsureLoadedAsync(ct);
+        var names = serverName is not null ? [serverName] : _skillStore.ListDraftServers();
+        var result = new List<SkillDraftSummary>();
+        foreach (var name in names)
+        {
+            var stored = await _skillStore.GetDraftAsync(name, ct);
+            if (stored is null || stored.Discarded)
+                continue;
+
+            var current = await _skillStore.GetAsync(name, ct);
+            bool? fits = null;
+            try
+            {
+                if (current is not null && _registry.TryGet(name, out var server) && server is not null)
+                    fits = (await StateAsync(server, current, ct)).Matches(stored);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogDebug(ex, "Could not check the stored skill draft for '{Server}'", name);
+            }
+
+            result.Add(new SkillDraftSummary
+            {
+                ServerName = name,
+                CreatedAt = stored.CreatedAt,
+                ServerVersion = stored.ServerVersion,
+                Model = stored.Model,
+                ValidationPassed = stored.ValidationPassed,
+                Problems = stored.Problems,
+                Omitted = stored.Omitted,
+                Current = fits,
+                Draft = serverName is not null ? stored.Markdown : null,
+                Diff = serverName is not null && current is not null ? LineDiff.Unified(current, stored.Markdown) : null,
+            });
+        }
+
+        return result;
+    }
+
+    private async Task<SkillRefreshResult> ApplyStoredAsync(
+        string serverName, SkillDraft stored, string current, SkillDrift? drift, CancellationToken ct)
+    {
+        if (!stored.ValidationPassed)
+        {
+            return WithDraft(Result("rejected",
+                "The stored draft failed validation, so it was not published. Fix the document by hand with update_skill, " +
+                "or call refresh_skill with regenerate: true for a new draft.", drift), stored, current);
+        }
+
+        if (!await PublishAsync(serverName, stored, ct))
+            return Conflict(serverName, drift);
+        return WithDraft(Result("applied",
+            $"Published the reviewed draft for '{serverName}' (from {stored.CreatedAt:u}). The previous version is in history; restore_skill can bring it back.",
+            drift), stored, current, fromStored: true);
+    }
+
+    /// <summary>What a draft must have been made from to still fit: the document, version, catalog and instructions.</summary>
+    private sealed record ServerState(
+        string DocumentHash, string? Version, string CatalogFingerprint, string InstructionsHash,
+        List<ToolDetail> Tools, List<PromptDetail> Prompts)
+    {
+        // The catalog and instructions can change without a version bump, so all four must match.
+        public bool Matches(SkillDraft draft)
+            => draft.BasedOnSha256 == DocumentHash
+               && draft.ServerVersion == Version
+               && draft.CatalogFingerprint == CatalogFingerprint
+               && draft.InstructionsSha256 == InstructionsHash;
+    }
+
+    private async Task<ServerState> StateAsync(RegisteredServer server, string current, CancellationToken ct)
+    {
+        var tools = await _toolIndex.GetToolsForServerAsync(server.Name, ct);
+        var prompts = await _toolIndex.GetPromptsForServerAsync(server.Name, ct);
+        return new ServerState(
+            SkillStore.ContentHash(current),
+            server.RemoteVersion,
+            SkillFingerprint.Compute(tools, prompts),
+            SkillStore.ContentHash(server.RemoteInstructions ?? string.Empty),
+            tools,
+            prompts);
+    }
+
+    /// <summary>
     /// Saves the draft only if the document is still the one it revises (checked atomically with the
     /// write), then records the catalog the draft was written from as the baseline. Returns false,
     /// changing nothing, when someone saved the document in the meantime.
@@ -197,7 +326,7 @@ public sealed partial class SkillMaintainer
         return true;
     }
 
-    private static SkillRefreshResult Conflict(string serverName, SkillDrift drift)
+    private static SkillRefreshResult Conflict(string serverName, SkillDrift? drift)
         => Result("conflict",
             $"The skill document for '{serverName}' was saved by someone else while this revision was prepared, so nothing was published " +
             "(their edit is kept). Call refresh_skill again for a draft of the current document.", drift);

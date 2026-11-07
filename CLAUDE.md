@@ -117,7 +117,12 @@ as is while its `BasedOnSha256` and server version still match. `SkillDraftValid
 model-judged). Every `SkillStore.SetAsync` archives the replaced version plus its baseline under
 `skills/history/{name}/`; `restore_skill` reinstates a version's baseline via `SkillSnapshot.ApplyBaselineAsync`
 (fingerprint recomputed from the stored catalog). Tests use `Helpers/FakeChatClient`.
-Roadmap (background upkeep, change sources: #58–#59): `docs/skill-maintenance.md`.
+Background upkeep (#58): `SkillMaintenanceHostedService` (registered in `AddAggregatorCore`) sweeps every
+`CheckInterval` and on `SkillMaintenanceSignal` (raised by `refresh_service`), mode `SkillMaintenance:Mode`
+(`Off`/`Notify`/`Propose`/`Auto`). `SkillMaintainer` decides draft reuse with one `ServerState` (document hash,
+version, catalog fingerprint, instructions hash); `discard_skill_draft` keeps the file with `Discarded = true` as
+the "already tried" marker. Tests drive `SweepAsync` / `CheckServerAsync` directly with a manual `TimeProvider`.
+Roadmap (change sources: #59): `docs/skill-maintenance.md`.
 
 ## Configuration
 
