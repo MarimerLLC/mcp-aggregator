@@ -10,6 +10,26 @@ public class SkillMaintenanceOptions
 {
     public const string SectionName = "McpAggregator:SkillMaintenance";
 
+    /// <summary>What the background upkeep does (issue #58). Default <see cref="SkillMaintenanceMode.Notify"/>.</summary>
+    public SkillMaintenanceMode Mode { get; set; } = SkillMaintenanceMode.Notify;
+
+    /// <summary>How often every skill's freshness is checked.</summary>
+    public TimeSpan CheckInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>Wait after start-up before the first check, so downstreams and the index can warm up.</summary>
+    public TimeSpan StartupDelay { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>Model calls the background upkeep may make per UTC day, across all servers.</summary>
+    public int MaxRevisionsPerDay { get; set; } = 10;
+
+    /// <summary>
+    /// After a revision attempt fails (model error or timeout) the server is skipped for this long,
+    /// doubling with each further failure up to <see cref="MaxFailureBackoff"/>.
+    /// </summary>
+    public TimeSpan FailureBackoff { get; set; } = TimeSpan.FromHours(1);
+
+    public TimeSpan MaxFailureBackoff { get; set; } = TimeSpan.FromHours(24);
+
     /// <summary>Key of the <c>IChatClient</c> the hosts register when <see cref="Model"/> is set.</summary>
     public const string ChatClientKey = "skill-maintenance";
 

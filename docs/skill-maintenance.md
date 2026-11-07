@@ -213,16 +213,66 @@ The tools are MCP-only for now; there is no REST equivalent.
 
 ## Phase 3: background upkeep (#58)
 
-A hosted service checks freshness on a timer and after `refresh_service`. It respects a daily
-revision cap and backs off from servers that keep failing validation. The mode is set by
+`SkillMaintenanceHostedService` (registered by `AddAggregatorCore`, so it runs in both hosts) waits
+`StartupDelay` (2 minutes), then sweeps every enabled server that has a skill document every
+`CheckInterval` (1 hour). `refresh_service` also wakes it for that one server via
+`SkillMaintenanceSignal`. Servers are handled one at a time. What it does depends on
 `SkillMaintenance:Mode`:
 
-- `Off`: nothing.
-- `Notify`: phase 1 only. This is the appsettings default.
-- `Propose`: drafts wait for `apply_skill_draft` / `discard_skill_draft`.
-- `Auto`: validated drafts are published, with history kept.
+| Mode | Stale skill | Version-only drift | `get_service_skill` notice |
+|---|---|---|---|
+| `Off` | nothing (no sweeps) | nothing | none |
+| `Notify` (appsettings default) | counted in `mcp_skill_stale_servers` | counted | yes |
+| `Propose` | a draft is made (`refresh_skill` without `apply`) | re-baselined, no model call | yes, plus "a draft is waiting" |
+| `Auto` | a draft is made and published if it passes validation; a failing one waits | re-baselined, no model call | yes |
 
-Version-only drift is re-baselined without the model in `Propose` and `Auto`.
+Rules that keep the cost bounded:
+
+- **One draft per server state.** If a stored draft still fits the document hash, version, catalog
+  fingerprint and instructions hash, the upkeep never makes another. That holds whether the draft
+  passed validation or not, and also for a discarded one. In `Auto` a waiting valid draft is
+  published (via `ApplyDraftAsync`, no model call). A manual `refresh_skill` likewise returns a
+  fitting stored draft instead of calling the model, unless `regenerate: true`.
+- **Daily cap.** `MaxRevisionsPerDay` (10) model calls per UTC day across all servers. The count is
+  in memory, so a restart resets it.
+- **Failure back-off.** A `failed` revision (model error or timeout) skips the server for
+  `FailureBackoff` (1 h), doubling per consecutive failure up to `MaxFailureBackoff` (24 h). A
+  validation failure doesn't need a back-off: its stored draft blocks a retry for the same state.
+- **No model configured.** `Propose`/`Auto` warn once and only report.
+
+The draft tools:
+
+- `list_skill_drafts(serverName?)`: summaries (validation, problems, `current`). With a server name,
+  also the text and diff.
+- `apply_skill_draft(serverName)`: publish as stored, never calling the model. Possible results are
+  `no_draft`, `obsolete` (no longer fits), `rejected` (failed validation), `applied` and `conflict`.
+- `discard_skill_draft(serverName)`: marks the draft `Discarded`. The file stays as the
+  "already tried this state" marker; it is hidden from the list, can't be applied, and
+  `refresh_skill` ignores it. The discard is conditional (`SkillStore.DiscardDraftIfUnchangedAsync`,
+  under the draft's write lock): if a newer draft was saved after it was read, nothing is discarded
+  and the tool says so.
+
+The stale notice announces a waiting draft only if `apply_skill_draft` would accept it: the same
+document/version/catalog/instructions match (`GetCurrentDraftAsync`), and not discarded.
+
+`SkillMaintenanceSignal` drops requests when the mode is `Off` (nothing reads the queue then), and
+otherwise holds at most 64 pending requests; the hourly sweep covers anything dropped. A cancellation
+that isn't host shutdown, such as an HTTP timeout to a downstream, is logged and skipped for that
+server instead of faulting the service.
+
+Drafts stay in `skills/drafts/{name}.json` (from phase 2) rather than a separate `.md`: the JSON
+carries the identity that decides whether a draft still fits.
+
+Observability:
+
+- one log line per revision (server, mode, from/to version, outcome, problems);
+- `mcp_skill_revisions_total{server_name, mode, outcome}`;
+- the `mcp_skill_stale_servers` gauge, set after each full sweep;
+- a "Skill Maintenance" row in the Grafana dashboard.
+
+A version-only re-baseline doesn't change the text, so it adds no history entry.
+
+The live instance should start in `Propose` and move to `Auto` once a few drafts have looked right.
 
 ## Phase 4: change sources (#59)
 

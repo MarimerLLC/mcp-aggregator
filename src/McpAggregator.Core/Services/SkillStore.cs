@@ -232,6 +232,46 @@ public class SkillStore
 
     public bool DeleteDraft(string serverName) => DeleteFile(GetDraftPath(serverName));
 
+    /// <summary>
+    /// Marks the stored draft discarded, but only if it is still the draft the caller read
+    /// (same <see cref="SkillDraft.CreatedAt"/> and text). The check and the write happen under the
+    /// draft's write lock, so a draft saved in between (by the upkeep or <c>refresh_skill</c>) is
+    /// never overwritten with the old one.
+    /// </summary>
+    public async Task<DraftDiscardOutcome> DiscardDraftIfUnchangedAsync(
+        string serverName, DateTimeOffset createdAt, string markdownSha256, CancellationToken ct = default)
+    {
+        var path = GetDraftPath(serverName);
+        var gate = LockFor(path);
+        await gate.WaitAsync(ct);
+        try
+        {
+            var current = await ReadJsonAsync<SkillDraft>(path, serverName, "skill draft", ct);
+            if (current is null || current.Discarded)
+                return DraftDiscardOutcome.NoDraft;
+            if (current.CreatedAt != createdAt || ContentHash(current.Markdown) != markdownSha256)
+                return DraftDiscardOutcome.Replaced;
+
+            current.Discarded = true;
+            await WriteJsonUnlockedAsync(path, current, ct);
+            return DraftDiscardOutcome.Discarded;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Servers with a stored draft, by name.</summary>
+    public List<string> ListDraftServers()
+    {
+        var dir = Path.Combine(_skillsDir, "drafts");
+        return Directory.Exists(dir)
+            ? Directory.GetFiles(dir, "*.json").Select(Path.GetFileNameWithoutExtension).OfType<string>()
+                .Order(StringComparer.OrdinalIgnoreCase).ToList()
+            : [];
+    }
+
     // ---------------------------------------------------------------- plumbing
 
     private async Task<T?> ReadJsonAsync<T>(string path, string serverName, string what, CancellationToken ct)
@@ -256,6 +296,19 @@ public class SkillStore
     {
         var gate = LockFor(path);
         await gate.WaitAsync(ct);
+        try
+        {
+            await WriteJsonUnlockedAsync(path, value, ct);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Temp file + rename; the caller holds <see cref="LockFor"/> for <paramref name="path"/>.</summary>
+    private static async Task WriteJsonUnlockedAsync<T>(string path, T value, CancellationToken ct)
+    {
         var temp = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
@@ -269,7 +322,6 @@ public class SkillStore
         {
             if (File.Exists(temp))
                 File.Delete(temp);
-            gate.Release();
         }
     }
 

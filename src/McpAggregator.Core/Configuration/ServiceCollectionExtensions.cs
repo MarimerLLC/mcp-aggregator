@@ -22,8 +22,10 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ToolProxyHandler>();
         services.AddSingleton<SummaryGenerator>();
         services.AddSingleton<SkillMaintainer>();
+        services.AddSingleton<SkillMaintenanceSignal>();
 
         services.AddHostedService<IdleConnectionCleanupService>();
+        services.AddHostedService<SkillMaintenanceHostedService>();
 
         return services;
     }

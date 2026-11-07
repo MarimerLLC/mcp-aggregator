@@ -50,8 +50,52 @@ public class SkillDraft
     public DateTimeOffset CreatedAt { get; set; }
     public string? Model { get; set; }
     public bool ValidationPassed { get; set; }
+
+    /// <summary>
+    /// Set by <c>discard_skill_draft</c> (issue #58). The file is kept as a marker so the background
+    /// upkeep doesn't draft again for the same document and server state; it is hidden from
+    /// <c>list_skill_drafts</c>, can't be applied, and <c>refresh_skill</c> ignores it.
+    /// </summary>
+    public bool Discarded { get; set; }
     public List<string> Problems { get; set; } = [];
     public List<string> Omitted { get; set; } = [];
+}
+
+/// <summary>What <c>discard_skill_draft</c> did.</summary>
+public enum DraftDiscardOutcome
+{
+    /// <summary>The draft is now marked discarded.</summary>
+    Discarded,
+
+    /// <summary>No draft was waiting (none stored, or already discarded).</summary>
+    NoDraft,
+
+    /// <summary>A different draft was saved between reading and discarding; it was left alone.</summary>
+    Replaced,
+}
+
+/// <summary>A stored draft as <c>list_skill_drafts</c> reports it (issue #58).</summary>
+public class SkillDraftSummary
+{
+    public required string ServerName { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public string? ServerVersion { get; set; }
+    public string? Model { get; set; }
+    public bool ValidationPassed { get; set; }
+    public List<string> Problems { get; set; } = [];
+    public List<string> Omitted { get; set; } = [];
+
+    /// <summary>
+    /// Whether the draft still fits the current document and server state (only then can it be
+    /// applied); null when that could not be checked (server unreachable or unregistered).
+    /// </summary>
+    public bool? Current { get; set; }
+
+    /// <summary>The draft text; only when one server was asked for.</summary>
+    public string? Draft { get; set; }
+
+    /// <summary>Unified diff from the current document to the draft; only when one server was asked for.</summary>
+    public string? Diff { get; set; }
 }
 
 /// <summary>What <c>refresh_skill</c> did and found.</summary>
@@ -60,7 +104,8 @@ public class SkillRefreshResult
     /// <summary>
     /// <c>proposed</c>, <c>applied</c>, <c>rejected</c> (validation failed, nothing saved),
     /// <c>version_only</c>, <c>rebaselined</c>, <c>fresh</c>, <c>unknown</c>, <c>no_skill</c>,
-    /// <c>unavailable</c> (no model configured), <c>conflict</c> (the document was saved by someone else
+    /// <c>unavailable</c> (no model configured), <c>no_draft</c> / <c>obsolete</c> (<c>apply_skill_draft</c>
+    /// with no draft, or one made for an earlier document or server state), <c>conflict</c> (the document was saved by someone else
     /// while the revision was prepared; nothing published) or <c>failed</c>.
     /// </summary>
     public required string Status { get; set; }

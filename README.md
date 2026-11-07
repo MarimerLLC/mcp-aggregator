@@ -195,9 +195,10 @@ Lazy activation is **per session** and is the aggregator's progressive disclosur
 starts with nine consumer tools (`find_tools`, `list_services`, `get_service_details`,
 `get_service_skill`, `invoke_tool`, `get_prompt`, `read_resource`, `refresh_service`,
 `show_admin_tools`), about 5 KB of `tools/list`. Downstream wrappers join that session's list when it searches for them or
-drills into a server; the ten administrative tools (`register_server`, `update_server`,
-`unregister_server`, `update_skill`, `refresh_skill`, `list_skill_history`, `restore_skill`,
-`regenerate_summary`, `enable_service`, `disable_service`)
+drills into a server; the thirteen administrative tools (`register_server`, `update_server`,
+`unregister_server`, `update_skill`, `refresh_skill`, `list_skill_drafts`, `apply_skill_draft`,
+`discard_skill_draft`, `list_skill_history`, `restore_skill`, `regenerate_summary`, `enable_service`,
+`disable_service`)
 join when it calls `show_admin_tools`. One client's discovery never enlarges another client's
 list. A client that already knows a name (from `find_tools`, a skill document, an earlier
 session) can call it directly; the aggregator resolves it by name and, from then on, lists it for
@@ -255,6 +256,9 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | `refresh_skill` | Ask the AI model to revise a stale skill document: returns a validated draft and diff, and publishes it with `apply: true` (see [Skill revision](#skill-revision)) |
 | `list_skill_history` | List the replaced versions of a server's skill document |
 | `restore_skill` | Restore an earlier version of a server's skill document |
+| `list_skill_drafts` | List revised skill drafts waiting for review; with `serverName`, the draft text and diff |
+| `apply_skill_draft` | Publish a server's waiting draft as is (never calls the model) |
+| `discard_skill_draft` | Discard a server's waiting draft |
 | `regenerate_summary` | Re-generate the AI summary for a registered server |
 
 ## REST API
@@ -347,6 +351,33 @@ can be set under `McpAggregator:SkillMaintenance`:
 ```
 
 `Model` empty means the `AI:Model`. These tools are MCP-only; there is no REST equivalent yet.
+
+#### Background upkeep
+
+`McpAggregator:SkillMaintenance:Mode` decides what the aggregator does about stale skills on its own:
+
+| Mode | What happens |
+|---|---|
+| `Off` | Nothing: no checks, and no stale notice in `get_service_skill` |
+| `Notify` (default) | The stale notice, and the `mcp_skill_stale_servers` metric |
+| `Propose` | Every stale skill gets a draft, which waits for `list_skill_drafts` / `apply_skill_draft` / `discard_skill_draft`; the stale notice says a draft is waiting. Version-only changes are re-baselined. |
+| `Auto` | Like `Propose`, but a draft that passes validation is published straight away (history kept). A failing draft waits for review. |
+
+A hosted service checks every enabled server with a skill document every `CheckInterval` (default
+1 hour, first check after `StartupDelay`, default 2 minutes). It also checks a server right after
+`refresh_service` is called for it. Servers are handled one at a time:
+
+- A draft is made at most once per server state: document, version, catalog and instructions.
+  This holds whether the draft passed validation or not, and a discarded draft counts.
+- Model calls are capped at `MaxRevisionsPerDay` per UTC day (default 10).
+- A server whose revision fails is backed off: `FailureBackoff`, doubling up to `MaxFailureBackoff`
+  (1 hour to 24 hours).
+
+Each revision is logged and counted in `mcp_skill_revisions_total{server_name, mode, outcome}`.
+
+```json
+"SkillMaintenance": { "Mode": "Propose", "CheckInterval": "01:00:00", "MaxRevisionsPerDay": 10 }
+```
 
 ### AI-Generated Server Summaries
 

@@ -16,7 +16,9 @@ public static class SkillNotice
     /// <summary>Change lines shown before collapsing the rest into "and N more".</summary>
     public const int MaxChangeLines = 12;
 
-    public static string Render(SkillDrift drift)
+    /// <param name="drift">What changed since the document was written.</param>
+    /// <param name="pendingDraft">A stored revision of this document waiting for review (issue #58), if any.</param>
+    public static string Render(SkillDrift drift, SkillDraft? pendingDraft = null)
     {
         var sb = new StringBuilder();
         sb.Append(StartMarker).Append('\n');
@@ -46,6 +48,16 @@ public static class SkillNotice
                 sb.Append("> - ").Append(line).Append('\n');
             if (lines.Count > MaxChangeLines)
                 sb.Append("> - and ").Append(lines.Count - MaxChangeLines).Append(" more (see `skillDrift` in `get_service_details`)\n");
+        }
+
+        if (pendingDraft is not null)
+        {
+            sb.Append("> A revised draft of this document (")
+              .Append(pendingDraft.CreatedAt.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
+              .Append(pendingDraft.ValidationPassed ? "" : ", failed validation")
+              .Append(") is waiting for review: `list_skill_drafts` shows it")
+              .Append(pendingDraft.ValidationPassed ? " and `apply_skill_draft` publishes it" : "")
+              .Append(".\n");
         }
 
         sb.Append("> Where this document and the live tool schemas disagree, trust the schemas (`get_service_details`).\n");
