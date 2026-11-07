@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using ModelContextProtocol.Protocol;
 
@@ -89,10 +90,27 @@ public class ToolDetail
     /// </summary>
     public string? WrapperName { get; set; }
 
+    /// <summary>The tool's human-readable title, when it declares one; omitted otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Title { get; set; }
+
+    /// <summary>
+    /// The tool's behavior hints (<c>readOnlyHint</c>, <c>destructiveHint</c>, <c>idempotentHint</c>,
+    /// <c>openWorldHint</c>), exactly as declared, so a client can decide when to confirm with the
+    /// user (issue #54). Omitted when the tool declares none.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ToolAnnotations? Annotations { get; set; }
+
+    /// <summary>The JSON Schema of the tool's structured result, when it declares one; omitted otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonElement? OutputSchema { get; set; }
+
     /// <summary>
     /// The downstream tool exactly as it came over the wire (title, annotations, output schema,
     /// icons, meta). Kept so <see cref="Tools.DownstreamToolWrapper"/> can carry everything through
-    /// unchanged; not part of the serialized consumer surface.
+    /// unchanged; not serialized itself (<see cref="Title"/>, <see cref="Annotations"/> and
+    /// <see cref="OutputSchema"/> are the parts of it the consumer surface shows).
     /// </summary>
     [JsonIgnore]
     public Tool? Protocol { get; set; }
