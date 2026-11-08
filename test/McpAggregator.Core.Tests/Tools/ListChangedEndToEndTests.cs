@@ -356,6 +356,19 @@ public class ListChangedEndToEndTests
             Assert.IsFalse(annotations.GetProperty("destructiveHint").GetBoolean(), echo.GetRawText());
         }
 
+        // … and so do find_tools matches.
+        var found = await client.CallToolAsync("find_tools",
+            new Dictionary<string, object?> { ["query"] = "echo" }, cancellationToken: TestTimeout);
+        Assert.IsFalse(found.IsError ?? false, TextOf(found));
+        using (var doc = JsonDocument.Parse(TextOf(found)))
+        {
+            var match = doc.RootElement.GetProperty("matches").EnumerateArray()
+                .Single(m => m.GetProperty("tool").GetString() == "probe__echo");
+            var annotations = match.GetProperty("annotations");
+            Assert.IsTrue(annotations.GetProperty("readOnlyHint").GetBoolean(), match.GetRawText());
+            Assert.IsFalse(annotations.GetProperty("destructiveHint").GetBoolean(), match.GetRawText());
+        }
+
         await relisted.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var after = (await client.ListToolsAsync(cancellationToken: TestTimeout)).Single(t => t.Name == "probe__echo");
         Assert.AreEqual(schemaBefore, after.JsonSchema.GetRawText(), "The test premise: the input schema did not change.");
