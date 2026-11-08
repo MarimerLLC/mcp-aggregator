@@ -27,6 +27,8 @@ public static class ServiceCollectionExtensions
 
         services.AddHostedService<IdleConnectionCleanupService>();
         services.AddHostedService<SkillMaintenanceHostedService>();
+        // Keeps the aggregator's own skill document current across releases (issue #72).
+        services.AddHostedService<SelfSkillSeeder>();
 
         return services;
     }

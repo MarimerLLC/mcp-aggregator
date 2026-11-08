@@ -193,7 +193,7 @@ public class ConsumerTools
             // retry needs no further round-trip.
             await registry.EnsureLoadedAsync(ct);
             var registered = registry.GetAll().Where(s => s.Enabled).Select(s => s.Name).Order(StringComparer.OrdinalIgnoreCase);
-            return ErrorResult($"{ex.Message} Registered servers: [{string.Join(", ", registered)}]. " +
+            return ErrorResult($"Server '{ex.ServerName}' not found. Registered servers: [{string.Join(", ", registered)}]. " +
                                "Re-invoke with one of those as serverName, or call find_tools to locate the tool.");
         }
         catch (AggregatorException ex) when (!ct.IsCancellationRequested)
@@ -253,7 +253,7 @@ public class ConsumerTools
         {
             await registry.EnsureLoadedAsync(ct);
             var registered = registry.GetAll().Where(s => s.Enabled).Select(s => s.Name).Order(StringComparer.OrdinalIgnoreCase);
-            return ErrorResult($"{ex.Message} Registered servers: [{string.Join(", ", registered)}]. " +
+            return ErrorResult($"Server '{ex.ServerName}' not found. Registered servers: [{string.Join(", ", registered)}]. " +
                                "Re-invoke with one of those as serverName, or call find_tools to locate the prompt.");
         }
         catch (AggregatorException ex) when (!ct.IsCancellationRequested)
@@ -321,7 +321,7 @@ public class ConsumerTools
         {
             await registry.EnsureLoadedAsync(ct);
             var registered = registry.GetAll().Where(s => s.Enabled).Select(s => s.Name).Order(StringComparer.OrdinalIgnoreCase);
-            return ErrorResult($"{ex.Message} Registered servers: [{string.Join(", ", registered)}]. " +
+            return ErrorResult($"Server '{ex.ServerName}' not found. Registered servers: [{string.Join(", ", registered)}]. " +
                                "Re-invoke with one of those as serverName, or call find_tools to locate the resource.");
         }
         catch (AggregatorException ex) when (!ct.IsCancellationRequested)

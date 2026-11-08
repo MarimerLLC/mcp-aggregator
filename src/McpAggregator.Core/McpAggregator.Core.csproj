@@ -12,6 +12,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The aggregator's own skill document, shipped so a release can update the live copy (issue #72). -->
+    <EmbeddedResource Include="..\..\data\skills\mcp-aggregator.md"
+                      LogicalName="McpAggregator.Core.Skills.mcp-aggregator.md"
+                      Link="Skills\mcp-aggregator.md" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.*" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />

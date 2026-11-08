@@ -45,7 +45,7 @@ The same discovery data is available via the REST API. Start with `GET /api` to 
 | `register_server` | `POST /api/admin/services` | Register a new downstream server |
 | `update_server` | `PUT /api/admin/services/{name}` | Update a server's transport configuration or metadata |
 | `unregister_server` | `DELETE /api/admin/services/{name}` | Remove a registered server |
-| `update_skill` | `PUT /api/admin/services/{name}/skill` | Set or update a server's skill document |
+| `update_skill` | `PUT /api/admin/services/{name}/skill` | Set or update a server's skill document (or this guide, as `mcp-aggregator`) |
 | `refresh_skill` | — | Have the aggregator's model propose (and with `apply: true` publish) a revision of a stale skill document |
 | `list_skill_history` | — | List the replaced versions of a server's skill document |
 | `restore_skill` | — | Restore an earlier version of a server's skill document |
@@ -259,7 +259,7 @@ update_server(
 
 Skill docs are **living documents** — they should be updated as you learn better patterns for using a server's tools. This is not just an admin task; it's an expected part of the usage lifecycle.
 
-Use `update_skill(serverName, markdown)` to set or improve any server's skill document. You should update a skill doc when you:
+Use `update_skill(serverName, markdown)` to set or improve any server's skill document, including this guide (`serverName: "mcp-aggregator"`; `list_skill_history` and `restore_skill` accept that name too). You should update a skill doc when you:
 
 - Discover required parameter patterns or defaults that aren't documented
 - Find gotchas, error conditions, or workarounds worth noting

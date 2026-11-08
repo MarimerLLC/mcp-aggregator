@@ -236,15 +236,23 @@ public class AdminTools
     }
 
     [McpServerTool(Name = "update_skill")]
-    [Description("Set or update the skill document (markdown) for a registered server.")]
+    [Description("Set or update the skill document (markdown) for a registered server, or for the aggregator itself (serverName 'mcp-aggregator', the document get_service_skill serves for it).")]
     public static async Task<string> UpdateSkill(
         ServerRegistry registry,
         SkillStore skillStore,
         ToolIndex toolIndex,
-        [Description("The name of the registered server")] string serverName,
+        [Description("The name of the registered server, or the aggregator's own name")] string serverName,
         [Description("Markdown content for the skill document")] string markdown,
         CancellationToken ct)
     {
+        if (IsSelf(registry, serverName))
+        {
+            // The aggregator is not in the registry and has no downstream catalog, so there is no
+            // skill flag to set and no freshness baseline to record (issue #72).
+            await skillStore.SetAsync(registry.SelfName, SkillNotice.Strip(markdown), ct);
+            return $"Skill document updated for '{registry.SelfName}' (the aggregator itself; no freshness baseline applies).";
+        }
+
         await registry.EnsureLoadedAsync(ct);
         registry.Get(serverName); // Validate server exists
         // A document fetched with get_service_skill may start with the stale notice; never store it.
@@ -380,15 +388,20 @@ public class AdminTools
         };
 
     [McpServerTool(Name = "list_skill_history")]
-    [Description("List the replaced versions of a server's skill document, newest first, with the server version each was written for. Pass a version to restore_skill to bring it back.")]
+    [Description("List the replaced versions of a server's skill document (or the aggregator's own), newest first, with the server version each was written for. Pass a version to restore_skill to bring it back.")]
     public static async Task<string> ListSkillHistory(
         ServerRegistry registry,
         SkillStore skillStore,
-        [Description("The name of the registered server")] string serverName,
+        [Description("The name of the registered server, or the aggregator's own name")] string serverName,
         CancellationToken ct)
     {
-        await registry.EnsureLoadedAsync(ct);
-        registry.Get(serverName); // Validate server exists
+        if (IsSelf(registry, serverName))
+            serverName = registry.SelfName;
+        else
+        {
+            await registry.EnsureLoadedAsync(ct);
+            registry.Get(serverName); // Validate server exists
+        }
         var history = await skillStore.ListHistoryAsync(serverName, ct);
         return JsonSerializer.Serialize(history, SkillMaintainer.ResultJson);
     }
@@ -399,17 +412,30 @@ public class AdminTools
         ServerRegistry registry,
         SkillStore skillStore,
         ToolIndex toolIndex,
-        [Description("The name of the registered server")] string serverName,
+        [Description("The name of the registered server, or the aggregator's own name")] string serverName,
         [Description("The version to restore, as list_skill_history shows it")] string version,
         CancellationToken ct)
     {
-        await registry.EnsureLoadedAsync(ct);
-        registry.Get(serverName); // Validate server exists
+        var self = IsSelf(registry, serverName);
+        if (self)
+            serverName = registry.SelfName;
+        else
+        {
+            await registry.EnsureLoadedAsync(ct);
+            registry.Get(serverName); // Validate server exists
+        }
+
         var entry = await skillStore.GetHistoryAsync(serverName, version, ct);
         if (entry is null)
             return $"No version '{version}' in the skill history for '{serverName}'. Call list_skill_history for the versions.";
 
         var (markdown, baseline) = entry.Value;
+        if (self)
+        {
+            await skillStore.SetAsync(serverName, markdown, ct);
+            return $"Restored version '{version}' of the skill document for '{serverName}' (the aggregator itself).";
+        }
+
         await skillStore.SetAsync(serverName, markdown, ct);
         await registry.UpdateSkillFlagAsync(serverName, true, ct);
         await SkillSnapshot.ApplyBaselineAsync(registry, toolIndex, serverName, baseline, ct);
@@ -419,6 +445,13 @@ public class AdminTools
             ? $"Restored version '{version}' of the skill document for '{serverName}'. It was kept without a baseline, so its freshness is unknown until the document is saved again with update_skill."
             : $"Restored version '{version}' of the skill document for '{serverName}', written for {baseline.RemoteVersion ?? "an unknown version"}.";
     }
+
+    /// <summary>
+    /// The aggregator's own name, which <c>get_service_skill</c> serves a document for but which is
+    /// not in the registry (registration rejects it). Case-insensitive, as everywhere else.
+    /// </summary>
+    private static bool IsSelf(ServerRegistry registry, string serverName)
+        => string.Equals(serverName, registry.SelfName, StringComparison.OrdinalIgnoreCase);
 
     private static async Task<string?> GenerateSummaryForServerAsync(
         RegisteredServer server,

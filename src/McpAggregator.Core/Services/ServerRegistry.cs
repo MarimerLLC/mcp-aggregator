@@ -86,7 +86,7 @@ public partial class ServerRegistry
     {
         if (_servers.TryGetValue(name, out var server))
             return server;
-        throw new ServerNotFoundException(name);
+        throw new ServerNotFoundException(name, _servers.Keys);
     }
 
     public bool TryGet(string name, out RegisteredServer? server)
@@ -114,7 +114,7 @@ public partial class ServerRegistry
     public async Task UnregisterAsync(string name, CancellationToken ct = default)
     {
         if (!_servers.TryRemove(name, out _))
-            throw new ServerNotFoundException(name);
+            throw new ServerNotFoundException(name, _servers.Keys);
 
         await PersistAsync(ct);
         _logger.LogInformation("Unregistered server '{Name}'", name);

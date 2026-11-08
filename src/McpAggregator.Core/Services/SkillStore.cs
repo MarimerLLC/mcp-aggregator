@@ -15,12 +15,16 @@ namespace McpAggregator.Core.Services;
 /// <item><c>{name}.md</c> — the document;</item>
 /// <item><c>{name}.baseline.json</c> — the catalog it was written against (issue #56);</item>
 /// <item><c>history/{name}/{version}.md</c> (+ <c>.baseline.json</c>) — every replaced version (issue #57);</item>
-/// <item><c>drafts/{name}.json</c> — the pending <c>refresh_skill</c> proposal (issue #57).</item>
+/// <item><c>drafts/{name}.json</c> — the pending <c>refresh_skill</c> proposal (issue #57);</item>
+/// <item><c>{self}.shipped.sha256</c> — for the aggregator's own document only: the
+/// <see cref="ShippedSelfSkill.Hash"/> of the shipped version the live document equals, kept by every
+/// save and read by <see cref="SelfSkillSeeder"/> (issue #72).</item>
 /// </list>
 /// </summary>
 public class SkillStore
 {
     private readonly string _skillsDir;
+    private readonly string _selfName;
     private readonly int _historyLimit;
     private readonly ILogger<SkillStore> _logger;
     private const int MaxSkillSizeBytes = 256 * 1024; // 256KB
@@ -31,12 +35,19 @@ public class SkillStore
     public SkillStore(IOptions<AggregatorOptions> options, ILogger<SkillStore> logger)
     {
         _skillsDir = options.Value.SkillsDirectoryPath;
+        _selfName = options.Value.SelfName;
         _historyLimit = Math.Max(0, options.Value.SkillHistoryLimit);
         _logger = logger;
         Directory.CreateDirectory(_skillsDir);
     }
 
     public static int MaxSkillSize => MaxSkillSizeBytes;
+
+    /// <summary>
+    /// The aggregator's own document as this build ships it (<see cref="ShippedSelfSkill.Text"/>);
+    /// settable so tests can stand in a different release.
+    /// </summary>
+    internal string? ShippedSelfDocument { get; set; } = ShippedSelfSkill.Text;
 
     public async Task<string?> GetAsync(string serverName, CancellationToken ct = default)
     {
@@ -116,6 +127,8 @@ public class SkillStore
                 await ArchiveAsync(serverName, previous, ct);
 
             await File.WriteAllTextAsync(path, markdown, ct);
+            if (IsSelf(serverName))
+                await RecordShippedMarkerAsync(markdown, ct);
             if (whileLocked is not null)
                 await whileLocked();
         }
@@ -137,6 +150,8 @@ public class SkillStore
     {
         DeleteBaseline(serverName);
         DeleteDraft(serverName);
+        if (IsSelf(serverName))
+            DeleteFile(GetShippedMarkerPath());
         var historyDir = GetHistoryDir(serverName);
         if (Directory.Exists(historyDir))
             Directory.Delete(historyDir, recursive: true);
@@ -149,6 +164,34 @@ public class SkillStore
     }
 
     public bool Exists(string serverName) => File.Exists(GetPath(serverName));
+
+    // ---------------------------------------------------------------- shipped self document (issue #72)
+
+    /// <summary>
+    /// The shipped version the aggregator's own document was last saved as, or null when it was last
+    /// saved with anything else (a deliberate edit) or was never saved since the marker existed.
+    /// </summary>
+    public async Task<string?> GetShippedMarkerAsync(CancellationToken ct = default)
+    {
+        var path = GetShippedMarkerPath();
+        return File.Exists(path) ? (await File.ReadAllTextAsync(path, ct)).Trim() : null;
+    }
+
+    /// <summary>
+    /// Every save of the aggregator's own document keeps the marker honest: equal to the shipped
+    /// version (line endings aside) → marker set, so a later release may replace it; anything else →
+    /// marker removed, so a deliberate edit is never overwritten.
+    /// </summary>
+    private async Task RecordShippedMarkerAsync(string markdown, CancellationToken ct)
+    {
+        var hash = ShippedSelfSkill.Hash(markdown);
+        if (ShippedSelfDocument is { } shipped && ShippedSelfSkill.Hash(shipped) == hash)
+            await File.WriteAllTextAsync(GetShippedMarkerPath(), hash, ct);
+        else
+            DeleteFile(GetShippedMarkerPath());
+    }
+
+    private bool IsSelf(string serverName) => string.Equals(serverName, _selfName, StringComparison.OrdinalIgnoreCase);
 
     // ---------------------------------------------------------------- baseline (issue #56)
 
@@ -386,4 +429,7 @@ public class SkillStore
 
     private string GetDraftPath(string serverName) =>
         Path.Combine(_skillsDir, "drafts", $"{serverName}.json");
+
+    private string GetShippedMarkerPath() =>
+        Path.Combine(_skillsDir, $"{_selfName}.shipped.sha256");
 }

@@ -209,6 +209,13 @@ public class AdminController : ControllerBase
     [HttpPut("{name}/skill")]
     public async Task<IActionResult> UpdateSkill(string name, [FromBody] UpdateSkillRequest request, CancellationToken ct)
     {
+        // The aggregator's own document (issue #72): not in the registry, no baseline to record.
+        if (string.Equals(name, _registry.SelfName, StringComparison.OrdinalIgnoreCase))
+        {
+            await _skillStore.SetAsync(_registry.SelfName, SkillNotice.Strip(request.Markdown), ct);
+            return Ok(new { message = $"Skill document updated for '{_registry.SelfName}' (the aggregator itself; no freshness baseline applies)." });
+        }
+
         await _registry.EnsureLoadedAsync(ct);
         _registry.Get(name); // Validate exists
         await _skillStore.SetAsync(name, SkillNotice.Strip(request.Markdown), ct);
