@@ -32,7 +32,9 @@ onedrive-personal__list_files(path: string)
 
 The wrapper's `inputSchema`, `title`, `annotations`, `outputSchema` and `icons` are the
 downstream's, unchanged. The description is prefixed `[server]`. `_meta.mcpAggregator` carries
-`{ serverId, serverName, toolName }`.
+`{ serverId, serverName, toolName }`. `get_service_details` shows the same `title`, `annotations`
+and `outputSchema` for each tool (omitted when the downstream declares none), so a client planning
+from the details view sees the same hints as the wrapper (issue #54).
 
 | Piece | Where | Role |
 |---|---|---|

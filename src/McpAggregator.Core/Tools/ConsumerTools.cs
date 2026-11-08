@@ -14,7 +14,7 @@ namespace McpAggregator.Core.Tools;
 public class ConsumerTools
 {
     [McpServerTool(Name = "find_tools")]
-    [Description("Search every registered downstream MCP server for tools, prompt templates and resources matching a query (name, description, URI, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas, matching prompts ('{server}__{prompt}') with their arguments, and matching resources with their 'mcp-aggregator://{server}/{uri}' URIs, and makes them callable in your tool, prompt and resource lists. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
+    [Description("Search every registered downstream MCP server for tools, prompt templates and resources matching a query (name, description, URI, or server). Returns the matching typed tools with their exact names ('{server}__{tool}') and full input schemas (plus their behavior annotations such as readOnlyHint and destructiveHint, when declared), matching prompts ('{server}__{prompt}') with their arguments, and matching resources with their 'mcp-aggregator://{server}/{uri}' URIs, and makes them callable in your tool, prompt and resource lists. Call the returned tool directly with the listed parameters — this is the preferred way to invoke downstream tools.")]
     public static async Task<string> FindTools(
         WrapperToolCatalog catalog,
         McpServer server,
@@ -32,6 +32,7 @@ public class ConsumerTools
             downstreamTool = m.Wrapper.ToolName,
             description = m.Detail.Description,
             inputSchema = m.Detail.InputSchema,
+            annotations = m.Detail.Annotations,
             activated = catalog.IsActive(m.Wrapper.ProtocolTool.Name, server)
         }).ToList();
 

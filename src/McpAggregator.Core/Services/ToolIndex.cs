@@ -286,13 +286,7 @@ public class ToolIndex
             {
                 if (tool is DownstreamToolWrapper || !seen.Add(tool.ProtocolTool.Name))
                     continue;
-                tools.Add(new ToolDetail
-                {
-                    Name = tool.ProtocolTool.Name,
-                    Description = tool.ProtocolTool.Description,
-                    InputSchema = tool.ProtocolTool.InputSchema,
-                    WrapperName = tool.ProtocolTool.Name,
-                });
+                tools.Add(OwnToolDetail(tool.ProtocolTool));
             }
         }
 
@@ -304,13 +298,7 @@ public class ToolIndex
             foreach (var tool in _adminTools.Tools)
             {
                 if (seen.Add(tool.ProtocolTool.Name))
-                    tools.Add(new ToolDetail
-                    {
-                        Name = tool.ProtocolTool.Name,
-                        Description = tool.ProtocolTool.Description,
-                        InputSchema = tool.ProtocolTool.InputSchema,
-                        WrapperName = tool.ProtocolTool.Name,
-                    });
+                    tools.Add(OwnToolDetail(tool.ProtocolTool));
             }
         }
         else
@@ -324,6 +312,18 @@ public class ToolIndex
 
         return tools;
     }
+
+    /// <summary>One of the aggregator's own tools: called directly, so its wrapper name is its own name.</summary>
+    private static ToolDetail OwnToolDetail(ModelContextProtocol.Protocol.Tool tool) => new()
+    {
+        Name = tool.Name,
+        Description = tool.Description,
+        InputSchema = tool.InputSchema,
+        WrapperName = tool.Name,
+        Title = tool.Title,
+        Annotations = tool.Annotations,
+        OutputSchema = tool.OutputSchema,
+    };
 
     private ServiceIndex SelfIndex()
     {
@@ -453,6 +453,9 @@ public class ToolIndex
                 ? JsonSerializer.Deserialize<object>(schema.GetRawText())
                 : null,
             WrapperName = WrapperNaming.For(serverName, t.Name),
+            Title = t.ProtocolTool.Title,
+            Annotations = t.ProtocolTool.Annotations,
+            OutputSchema = t.ProtocolTool.OutputSchema,
             Protocol = t.ProtocolTool
         }).ToList();
 

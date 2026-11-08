@@ -1,8 +1,10 @@
 using SysDescription = System.ComponentModel.DescriptionAttribute;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Tests.Helpers;
 using McpAggregator.Core.Services;
+using McpAggregator.Core.Tools;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -272,6 +274,44 @@ public class ToolIndexTests
         Assert.AreEqual(0, resources.Count);
         var details = await harness.Index.GetDetailsAsync("alpha", TestTimeout);
         Assert.AreEqual(0, details.Resources.Count);
+    }
+
+    // ---------------------------------------------------------------- tool metadata in details (issue #54)
+
+    [TestMethod]
+    public async Task GetServiceDetails_ShowsToolTitleAnnotationsAndOutputSchema_AndOmitsThemWhenAbsent()
+    {
+        var annotated = Tool(Echo, "list_things");
+        annotated.ProtocolTool.Title = "List things";
+        annotated.ProtocolTool.Annotations = new ToolAnnotations { ReadOnlyHint = true, DestructiveHint = false };
+        annotated.ProtocolTool.OutputSchema = JsonDocument.Parse(
+            """{"type":"object","properties":{"count":{"type":"integer"}}}""").RootElement.Clone();
+        var plain = Tool(Echo, "echo");
+
+        await using var harness = await WrapperHarness.CreateAsync(_dataDir, WrapperToolMode.Eager,
+            ("alpha", [annotated, plain]));
+
+        var details = await harness.Index.GetDetailsAsync("alpha", TestTimeout);
+        var detail = details.Tools.Single(t => t.Name == "list_things");
+        Assert.AreEqual("List things", detail.Title);
+        Assert.IsTrue(detail.Annotations?.ReadOnlyHint);
+        Assert.IsFalse(detail.Annotations?.DestructiveHint ?? true);
+        Assert.IsTrue(detail.OutputSchema.HasValue);
+
+        // The consumer surface: get_service_details' own JSON (Eager mode never touches the session).
+        var json = await ConsumerTools.GetServiceDetails(harness.Index, harness.Catalog, null!, "alpha", TestTimeout);
+        var tools = JsonNode.Parse(json)!["tools"]!.AsArray();
+
+        var listThings = tools.Single(t => (string?)t!["name"] == "list_things")!;
+        Assert.AreEqual("List things", (string?)listThings["title"]);
+        Assert.IsTrue((bool?)listThings["annotations"]?["readOnlyHint"]);
+        Assert.IsFalse((bool?)listThings["annotations"]?["destructiveHint"] ?? true);
+        Assert.AreEqual("integer", (string?)listThings["outputSchema"]?["properties"]?["count"]?["type"]);
+
+        var echo = tools.Single(t => (string?)t!["name"] == "echo")!.AsObject();
+        Assert.IsFalse(echo.ContainsKey("title"), echo.ToJsonString());
+        Assert.IsFalse(echo.ContainsKey("annotations"), echo.ToJsonString());
+        Assert.IsFalse(echo.ContainsKey("outputSchema"), echo.ToJsonString());
     }
 
     // ---------------------------------------------------------------- metadata-only refetch (issue #52)
