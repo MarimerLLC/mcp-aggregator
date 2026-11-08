@@ -215,6 +215,43 @@ public class UnknownToolHintTests
     }
 
     [TestMethod]
+    [DataRow("update_skill", DisplayName = "update_skill")]
+    [DataRow("enable_service", DisplayName = "enable_service")]
+    [DataRow("list_skill_history", DisplayName = "list_skill_history")]
+    public async Task AdminTool_UnknownServer_ReturnsTheMessageInsteadOfAnOpaqueFault(string tool)
+    {
+        // Issue #72: an AggregatorException escaping an admin tool reached the SDK as a plain
+        // exception, so the caller saw only "An error occurred invoking '<tool>'."
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var args = new Dictionary<string, object?> { ["serverName"] = "nope" };
+        if (tool == "update_skill")
+            args["markdown"] = "# x";
+        var result = await CallAsync(rig, tool, args);
+
+        Assert.IsTrue(result.IsError ?? false);
+        var text = TextOf(result);
+        StringAssert.Contains(text, "Server 'nope' not found.");
+        StringAssert.Contains(text, "Registered servers: [probe]");
+        Assert.AreNotEqual($"An error occurred invoking '{tool}'.", text.Trim());
+    }
+
+    [TestMethod]
+    public async Task UpdateSkill_AggregatorItself_IsAcceptedOverMcp()
+    {
+        await using var rig = await BuildAsync(WrapperToolMode.Lazy);
+
+        var result = await CallAsync(rig, "update_skill", new()
+        {
+            ["serverName"] = "mcp-aggregator",
+            ["markdown"] = "# Aggregator\n"
+        });
+
+        Assert.IsFalse(result.IsError ?? false, TextOf(result));
+        StringAssert.Contains(TextOf(result), "Skill document updated for 'mcp-aggregator'");
+    }
+
+    [TestMethod]
     public async Task UnknownServer_NamesRegisteredServersAndFindTools()
     {
         // The rename case: calendar-mcp became adjutant; the caller still holds the old prefix.

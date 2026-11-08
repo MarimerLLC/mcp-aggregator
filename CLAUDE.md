@@ -102,6 +102,21 @@ attributed tools no matter what the catalog does. The pre-assigned (even empty) 
 `ResourceCollection` is also what makes the SDK advertise the prompts / resources capability with
 `listChanged`. `McpServerWiringTests` pins all three.
 
+`AggregatorException` derives from `McpException` (issue #72): the SDK passes an `McpException`'s message on
+("An error occurred invoking '{tool}': {message}") and turns any other exception into the bare
+"An error occurred invoking '{tool}'.", so an aggregator failure escaping any tool stays readable.
+`ServerNotFoundException` from `ServerRegistry` lists the registered servers; `ConsumerTools` catches format
+from `ServerName` and list only the enabled ones.
+
+The aggregator's own skill document (`skills/{SelfName}.md`) is not in the registry: `update_skill`,
+`list_skill_history`, `restore_skill` and REST `PUT .../skill` special-case `SelfName` (save via `SkillStore`,
+no skill flag, no baseline). `data/skills/mcp-aggregator.md` is embedded in Core (`ShippedSelfSkill`;
+`.dockerignore` re-includes it). Every `SkillStore` save of the self document writes
+`skills/{SelfName}.shipped.sha256` when the text equals the shipped one (line endings aside) and deletes it
+otherwise; `SelfSkillSeeder` (hosted, startup) writes the shipped document when there is none and replaces the
+live one only when it equals that marker, so edits are never overwritten and a pre-#72 document stays until
+someone saves the shipped text with `update_skill`.
+
 Server names are validated at registration (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`, no `__`, not the
 aggregator's own name) because they become wrapper-name prefixes. `RegisteredServer.Id` is immutable
 and backfilled on load.

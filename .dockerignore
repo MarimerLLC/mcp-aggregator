@@ -8,3 +8,5 @@
 data/
 *.md
 .dockerignore
+# Embedded in McpAggregator.Core as the shipped self skill document (issue #72).
+!data/skills/mcp-aggregator.md

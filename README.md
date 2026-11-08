@@ -252,7 +252,7 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | `register_server` | Admin: register a new downstream MCP server |
 | `unregister_server` | Remove a registered server |
 | `update_server` | Update a registered server's transport configuration or metadata |
-| `update_skill` | Set or update a server's skill document |
+| `update_skill` | Set or update a server's skill document (or the aggregator's own, as `mcp-aggregator`) |
 | `refresh_skill` | Ask the AI model to revise a stale skill document: returns a validated draft and diff, and publishes it with `apply: true` (see [Skill revision](#skill-revision)) |
 | `list_skill_history` | List the replaced versions of a server's skill document |
 | `restore_skill` | Restore an earlier version of a server's skill document |
