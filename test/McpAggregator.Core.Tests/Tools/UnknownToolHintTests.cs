@@ -208,7 +208,8 @@ public class UnknownToolHintTests
 
         Assert.IsTrue(result.IsError ?? false);
         var text = TextOf(result);
-        StringAssert.Contains(text, "'arguments' must be the tool's argument object encoded as a JSON string");
+        StringAssert.Contains(text, "'arguments' must be the tool's argument object");
+        StringAssert.Contains(text, "is not valid JSON");
         StringAssert.Contains(text, "You sent: message=hi");
         Assert.IsFalse(text.Contains("An error occurred invoking"), text);
     }

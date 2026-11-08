@@ -78,6 +78,12 @@ args, via)` (`via` is `wrapper` or `get_prompt`). Both resource paths go through
 callers rewrite the returned content URIs with `ResourceUriNaming.RewriteContents`. Design note and
 rockbot #420 answers: `docs/typed-wrapper-tools.md`.
 
+`invoke_tool`, `get_prompt` and REST invoke take `arguments` as `JsonElement?`: the argument object or a JSON
+string of it (issue #70), read by `ToolProxyHandler.TryReadArgumentObject`, which returns a named error for anything
+else instead of throwing (a binding failure would surface as the SDK's bare "An error occurred invoking ..."). The
+SDK's schema for a `JsonElement` parameter is untyped, so the `PostConfigure` guard in `AddAggregatorMcpServer` rewrites
+`properties.arguments.type` to `["object","string","null"]` via `ConsumerTools.AdvertiseObjectOrStringArguments`.
+
 `McpServer` is not in DI. The handle the catalog uses is `IOptions<McpServerOptions>.Value.ToolCollection`;
 the SDK server reads it live per `tools/list` and (stateful transports only) subscribes to its `Changed`
 event. `DeferChangedEvents()` batches a sync into one `Changed` (none if nothing changed).

@@ -453,6 +453,6 @@ public class PromptListChangedEndToEndTests
             cancellationToken: TestTimeout);
 
         Assert.IsTrue(result.IsError ?? false);
-        StringAssert.Contains(TextOf(result), "encoded as a JSON string");
+        StringAssert.Contains(TextOf(result), "'arguments' must be the prompt's argument object");
     }
 }
