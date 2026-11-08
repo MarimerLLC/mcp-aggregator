@@ -299,10 +299,22 @@ public class ToolProxyHandler
             JsonValueKind.Array => element.EnumerateArray()
                 .Select(ConvertJsonElement)
                 .ToList(),
-            JsonValueKind.Object => element.EnumerateObject()
-                .ToDictionary(p => p.Name, p => ConvertJsonElement(p.Value)),
+            JsonValueKind.Object => ObjectToDictionary(element, ConvertJsonElement),
             _ => element.GetRawText(),
         };
+    }
+
+    /// <summary>
+    /// The properties of a JSON object as a dictionary. A repeated name keeps its last value, as
+    /// <see cref="JsonSerializer"/> does when it reads a dictionary; <c>ToDictionary</c> would throw
+    /// instead (PR #71 review).
+    /// </summary>
+    internal static Dictionary<string, object?> ObjectToDictionary(JsonElement obj, Func<JsonElement, object?> convert)
+    {
+        var result = new Dictionary<string, object?>();
+        foreach (var property in obj.EnumerateObject())
+            result[property.Name] = convert(property.Value);
+        return result;
     }
 
     /// <summary>
@@ -409,7 +421,7 @@ public class ToolProxyHandler
         }
 
         IReadOnlyDictionary<string, object?>? args = argumentObject is { } obj
-            ? obj.EnumerateObject().ToDictionary(p => p.Name, p => ConvertJsonElement(p.Value))
+            ? ObjectToDictionary(obj, ConvertJsonElement)
             : null;
 
         return await InvokeAsync(serverName, toolName, args, InvocationPath.InvokeTool, ct);

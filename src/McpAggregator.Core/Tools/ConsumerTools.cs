@@ -256,9 +256,8 @@ public class ConsumerTools
                 return ErrorResult(error!);
 
             IReadOnlyDictionary<string, object?>? args = argumentObject is { } obj
-                ? obj.EnumerateObject().ToDictionary(
-                    p => p.Name,
-                    p => (object?)(p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : p.Value.GetRawText()))
+                ? ToolProxyHandler.ObjectToDictionary(
+                    obj, v => v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText())
                 : null;
 
             var result = await proxy.GetPromptAsync(serverName, promptName, args, InvocationPath.GetPrompt, ct);

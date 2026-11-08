@@ -204,6 +204,24 @@ public class InvokeToolArgumentsTests
         Assert.AreEqual("pong", TextOf(result));
     }
 
+    [TestMethod]
+    public async Task InvokeTool_RepeatedArgumentName_LastValueWins()
+    {
+        // The string form used to go through Dictionary deserialization, which keeps the last of a
+        // repeated name. Reading the object must not throw on it instead (PR #71 review).
+        await using var rig = await BuildAsync();
+        const string json = """{"message":"first","message":"second"}""";
+
+        var asString = await InvokeAsync(rig, "echo", json);
+        using var doc = JsonDocument.Parse(json);
+        var asObject = await InvokeAsync(rig, "echo", doc.RootElement.Clone());
+
+        Assert.IsFalse(asString.IsError ?? false, TextOf(asString));
+        Assert.AreEqual("echo:second", TextOf(asString));
+        Assert.IsFalse(asObject.IsError ?? false, TextOf(asObject));
+        Assert.AreEqual("echo:second", TextOf(asObject));
+    }
+
     // ------------------------------------------------------------------ invoke_tool: rejected forms
 
     [TestMethod]
@@ -275,6 +293,27 @@ public class InvokeToolArgumentsTests
 
         Assert.IsFalse(result.IsError ?? false, TextOf(result));
         Assert.AreEqual("Summarize: as string", PromptTextOf(result));
+    }
+
+    [TestMethod]
+    public async Task GetPrompt_RepeatedArgumentName_LastValueWins()
+    {
+        await using var rig = await BuildAsync();
+
+        var result = await GetPromptAsync(rig, "summarize", """{"text":"first","text":"second"}""");
+
+        Assert.IsFalse(result.IsError ?? false, TextOf(result));
+        Assert.AreEqual("Summarize: second", PromptTextOf(result));
+    }
+
+    [TestMethod]
+    public void ConvertJsonElement_NestedRepeatedName_LastValueWins()
+    {
+        using var doc = JsonDocument.Parse("""{"filter":{"folder":"a","folder":"b"}}""");
+
+        var converted = (Dictionary<string, object?>)ToolProxyHandler.ConvertJsonElement(doc.RootElement)!;
+
+        Assert.AreEqual("b", ((Dictionary<string, object?>)converted["filter"]!)["folder"]);
     }
 
     [TestMethod]
