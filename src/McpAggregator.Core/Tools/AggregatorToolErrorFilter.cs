@@ -123,7 +123,7 @@ public static class AggregatorToolErrorFilter
             return $"Unknown tool '{toolName}'. Typed tools are named '{{server}}{WrapperNaming.Separator}{{tool}}' and your " +
                    "tool list may be out of date (the server may have been renamed, disabled, or its tools not activated yet). " +
                    $"Call find_tools(query: \"{tool}\") for the current name and schema, refresh your tool list, " +
-                   $"or use invoke_tool(serverName: \"{server}\", toolName: \"{tool}\", arguments: <JSON object as a string>).";
+                   $"or use invoke_tool(serverName: \"{server}\", toolName: \"{tool}\", arguments: <the tool's argument object; a JSON string of it is also accepted>).";
         }
 
         return $"Unknown tool '{toolName}'. Downstream tools are typed tools named '{{server}}{WrapperNaming.Separator}{{tool}}'; " +

@@ -952,7 +952,7 @@ public sealed class WrapperToolCatalog
         // Reachable only when the call could not be dispatched (no catalog-aware handler on this
         // server). The tool exists; say so and give the generic route.
         return $"Tool '{toolName}' exists on server '{server.Name}' but could not be dispatched by this endpoint. " +
-               $"Call it via invoke_tool(serverName: \"{server.Name}\", toolName: \"{wrapper.ToolName}\", arguments: <JSON object as a string>). " +
+               $"Call it via invoke_tool(serverName: \"{server.Name}\", toolName: \"{wrapper.ToolName}\", arguments: <the tool's argument object; a JSON string of it is also accepted>). " +
                $"Input schema: {wrapper.ProtocolTool.InputSchema.GetRawText()}";
     }
 

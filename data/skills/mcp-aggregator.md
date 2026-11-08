@@ -16,7 +16,7 @@ Every downstream tool is available as a **typed tool named `{server}__{tool}`** 
 2. **Call the typed tool** — call the returned `tool` name directly with the parameters from its `inputSchema`, e.g. `microsoft-learn__microsoft_docs_search(query: "dependency injection")`. Request a returned `prompt` name through `prompts/get` with its listed arguments. Read a returned resource `uri` through `resources/read`.
 3. **Or browse** — `list_services` shows every server with each tool's `wrapperName`; `get_service_details(serverName)` returns full schemas (with each tool's `title`, `annotations` — `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — and `outputSchema` when the server declares them, so you can tell read-only tools from destructive ones before calling), prompt templates (each with its `wrapperName`) and resources (each with its `uri`) and, in `Lazy` mode, makes that server's typed tools, prompts and resources callable.
 4. **Read the skill** — call `get_service_skill(serverName)` before using a server for the first time; skill documents carry required-parameter patterns and gotchas.
-5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as a JSON object encoded as a string. Use `get_prompt(serverName, promptName, arguments)` the same way for prompt templates when your client has no prompt support, and `read_resource(serverName, uri)` for resources when it has no resource support.
+5. **Fallback** — if your client rejects a typed tool name as not found, or you are on the stateless HTTP endpoint, call `invoke_tool(serverName, toolName, arguments)` with `arguments` as the tool's argument object (a JSON string of that object is also accepted). Use `get_prompt(serverName, promptName, arguments)` the same way for prompt templates when your client has no prompt support, and `read_resource(serverName, uri)` for resources when it has no resource support.
 6. **Administer** — the administrative tools (`register_server`, `update_server`, `unregister_server`, `update_skill`, `refresh_skill`, `list_skill_drafts`, `apply_skill_draft`, `discard_skill_draft`, `set_skill_sources`, `list_skill_history`, `restore_skill`, `regenerate_summary`, `enable_service`, `disable_service`) are hidden from your tool list until you call `show_admin_tools`; they are also callable by name without that step.
 7. **Improve the skill** — if you discover tips, gotchas, required parameter patterns, or better workflows while using a server, call `update_skill` to improve its skill doc so future sessions benefit.
 
@@ -35,7 +35,7 @@ The same discovery data is available via the REST API. Start with `GET /api` to 
 | `list_services` | `GET /api/services` | Index of all servers, their tools and each tool's `wrapperName` |
 | `get_service_details` | `GET /api/services/{name}` | Full tool schemas (plus each tool's `title`, `annotations` and `outputSchema` when declared), prompt templates and resources for a server; activates its typed tools, prompts and resources in `Lazy` mode |
 | `get_service_skill` | `GET /api/services/{name}/skill` | Skill/usage guide for a server |
-| `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Escape hatch: proxy a tool call with a stringified JSON argument object |
+| `invoke_tool` | `POST /api/services/{name}/tools/{tool}/invoke` | Escape hatch: proxy a tool call with the tool's argument object (or a JSON string of it) |
 | `get_prompt` | — | Escape hatch: retrieve a rendered prompt template from a downstream server when your client has no prompt support (MCP only) |
 | `read_resource` | — | Escape hatch: read a downstream resource by URI when your client has no resource support (MCP only) |
 | `refresh_service` | — | Drop cached connection, tools, prompts and resources for a server and rebuild its typed tools, prompts and resources |
@@ -77,14 +77,14 @@ microsoft-learn__microsoft_docs_search(query: "dependency injection in ASP.NET C
 
 ## Calling invoke_tool (fallback)
 
-Use `invoke_tool` when your client will not let you call the typed tool (see *Client capability*). Pass `arguments` as a JSON object **encoded as a string** with the tool's expected parameters.
+Use `invoke_tool` when your client will not let you call the typed tool (see *Client capability*). Pass `arguments` as the tool's argument object, with the parameters from its input schema. A JSON string of that object (`"{\"query\": \"...\"}"`) is also accepted; omit `arguments` for a tool that takes none.
 
 **Example:**
 ```
 invoke_tool(
   serverName: "microsoft-learn",
   toolName: "microsoft_docs_search",
-  arguments: "{\"query\": \"dependency injection in ASP.NET Core\"}"
+  arguments: { "query": "dependency injection in ASP.NET Core" }
 )
 ```
 
@@ -105,13 +105,13 @@ The result contains a description and a list of messages (with role and content)
 
 `WrapperMode` applies to prompts as it does to tools: in `Lazy` mode a prompt appears in **your** prompt list after `find_tools` / `get_service_details` (the aggregator sends `prompts/list_changed`), and any existing `{server}__{prompt}` name is accepted by `prompts/get` whether or not it is listed; in `Eager` mode every prompt of every enabled server is always listed.
 
-**Fallback.** If your client has no prompt support, call `get_prompt` with the server name, the downstream prompt name, and the arguments as a JSON object encoded as a string:
+**Fallback.** If your client has no prompt support, call `get_prompt` with the server name, the downstream prompt name, and the prompt's argument object (a JSON string of it is also accepted):
 
 ```
 get_prompt(
   serverName: "my-server",
   promptName: "summarize_document",
-  arguments: "{\"document\": \"...content...\", \"style\": \"bullet-points\"}"
+  arguments: { "document": "...content...", "style": "bullet-points" }
 )
 ```
 

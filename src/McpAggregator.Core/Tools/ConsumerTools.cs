@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Exceptions;
 using McpAggregator.Core.Services;
@@ -64,8 +65,8 @@ public class ConsumerTools
         var hint = matches.Count == 0 && prompts.Count == 0 && resources.Count == 0
             ? "No downstream tool, prompt or resource matched. Try different words, or call list_services to browse every server and its tools. Administrative tools (register/update/unregister servers, skills, summaries, enable/disable) are not searched here; call show_admin_tools for those."
             : catalog.Mode == WrapperToolMode.Lazy
-                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name (prompts/list_changed was sent); get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback. Resources are read through resources/read by their 'uri' (resources/list_changed was sent; expand a template's {placeholders} first); read_resource(serverName: server, uri: downstreamUri) is the fallback."
-                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <JSON object as a string>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name; get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback. Resources are read through resources/read by their 'uri' (expand a template's {placeholders} first); read_resource(serverName: server, uri: downstreamUri) is the fallback.";
+                ? "Call the 'tool' name directly with the parameters in its inputSchema; tools/list_changed was sent to this session. If your client rejects the name as not found (its tool index has not refreshed), do not retry it: call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <the tool's argument object; a JSON string of it is also accepted>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name (prompts/list_changed was sent); get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback. Resources are read through resources/read by their 'uri' (resources/list_changed was sent; expand a template's {placeholders} first); read_resource(serverName: server, uri: downstreamUri) is the fallback."
+                : "Call the 'tool' name directly with the parameters in its inputSchema. If your client rejects the name as not found, call invoke_tool(serverName: server, toolName: downstreamTool, arguments: <the tool's argument object; a JSON string of it is also accepted>) with the same arguments instead. Prompts are requested through prompts/get by their 'prompt' name; get_prompt(serverName: server, promptName: downstreamPrompt, arguments) is the fallback. Resources are read through resources/read by their 'uri' (expand a template's {placeholders} first); read_resource(serverName: server, uri: downstreamUri) is the fallback.";
 
         return JsonSerializer.Serialize(new
         {
@@ -164,13 +165,13 @@ public class ConsumerTools
     }
 
     [McpServerTool(Name = "invoke_tool")]
-    [Description("Invoke a downstream tool through the generic proxy. The typed '{server}__{tool}' tools (see find_tools) take the tool's real parameters; use this when your client rejects a typed name as not found. Downstream servers only: the aggregator's own tools (find_tools, update_skill, ...) are called directly. 'arguments' must be the tool's argument object encoded as a JSON string.")]
+    [Description("Invoke a downstream tool through the generic proxy. The typed '{server}__{tool}' tools (see find_tools) take the tool's real parameters; use this when your client rejects a typed name as not found. Downstream servers only: the aggregator's own tools (find_tools, update_skill, ...) are called directly. 'arguments' is the tool's argument object; a JSON string of that object is also accepted.")]
     public static async Task<CallToolResult> InvokeTool(
         ToolProxyHandler proxy,
         ServerRegistry registry,
         [Description("The name of the registered server (from list_services), e.g. 'adjutant'")] string serverName,
         [Description("The downstream tool's own name (from list_services or get_service_details), e.g. 'send_email' — not the typed '{server}__{tool}' name")] string toolName,
-        [Description("The tool's argument object encoded as a JSON string, e.g. \"{\\\"query\\\": \\\"...\\\"}\"")] string? arguments = null,
+        [Description(ArgumentsParameterDescription)] JsonElement? arguments = null,
         CancellationToken ct = default)
     {
         // list_services advertises the aggregator itself (so its skill document is discoverable),
@@ -203,28 +204,44 @@ public class ConsumerTools
             // a small model off guessing.
             return ErrorResult(ex.Message);
         }
-        catch (JsonException ex) when (!ct.IsCancellationRequested)
-        {
-            return ErrorResult(
-                $"'arguments' must be the tool's argument object encoded as a JSON string, for example " +
-                $"\"{{\\\"query\\\": \\\"text\\\"}}\". You sent: {Truncate(arguments, 200)}. Parse error: {ex.Message}");
-        }
+    }
+
+    /// <summary>
+    /// The aggregator tools whose <c>arguments</c> parameter takes the argument object or a JSON
+    /// string of it (issue #70). <see cref="AdvertiseObjectOrStringArguments"/> widens their schema.
+    /// </summary>
+    internal static readonly string[] ObjectOrStringArgumentTools = ["invoke_tool", "get_prompt"];
+
+    private const string ArgumentsParameterDescription =
+        "The argument object, e.g. {\"query\": \"...\"}. A JSON string of that object is also accepted. Omit or pass null for no arguments.";
+
+    /// <summary>
+    /// The SDK generates an untyped schema for a <see cref="JsonElement"/> parameter. Rewrite
+    /// <c>properties.arguments.type</c> to <c>["object", "string", "null"]</c> so a caller building the
+    /// call from the schema sees both accepted forms. Idempotent; the tool instance is a DI singleton
+    /// shared by every options instance, so patching it once is enough.
+    /// </summary>
+    internal static void AdvertiseObjectOrStringArguments(McpServerTool tool)
+    {
+        var schema = JsonNode.Parse(tool.ProtocolTool.InputSchema.GetRawText()) as JsonObject;
+        if (schema?["properties"]?["arguments"] is not JsonObject arguments)
+            return;
+
+        arguments["type"] = new JsonArray("object", "string", "null");
+        tool.ProtocolTool.InputSchema = JsonSerializer.SerializeToElement(schema);
     }
 
     private static CallToolResult ErrorResult(string text)
         => new() { IsError = true, Content = [new TextContentBlock { Text = text }] };
 
-    private static string Truncate(string? s, int max)
-        => string.IsNullOrEmpty(s) ? "(nothing)" : s.Length <= max ? s : s[..max] + "…";
-
     [McpServerTool(Name = "get_prompt")]
-    [Description("Escape hatch: retrieve a rendered prompt template from a downstream MCP server. Downstream prompts are also exposed as MCP prompts named '{server}__{prompt}' (see find_tools or get_service_details); use those through prompts/get when your client supports prompts, and this tool when it does not. Returns the prompt description and messages ready for use in a conversation. 'arguments' must be the prompt's argument object encoded as a JSON string.")]
+    [Description("Escape hatch: retrieve a rendered prompt template from a downstream MCP server. Downstream prompts are also exposed as MCP prompts named '{server}__{prompt}' (see find_tools or get_service_details); use those through prompts/get when your client supports prompts, and this tool when it does not. Returns the prompt description and messages ready for use in a conversation. 'arguments' is the prompt's argument object; a JSON string of that object is also accepted.")]
     public static async Task<CallToolResult> GetPrompt(
         ToolProxyHandler proxy,
         ServerRegistry registry,
         [Description("The name of the registered server (from list_services), e.g. 'adjutant'")] string serverName,
         [Description("The downstream prompt's own name (from get_service_details), e.g. 'plan_release' — not the '{server}__{prompt}' name")] string promptName,
-        [Description("JSON object of string argument values for the prompt template, e.g. \"{\\\"topic\\\": \\\"...\\\"}\", or null if no arguments needed")] string? arguments = null,
+        [Description("The prompt's argument object of string values, e.g. {\"topic\": \"...\"}. A JSON string of that object is also accepted. Omit or pass null if the prompt takes no arguments.")] JsonElement? arguments = null,
         CancellationToken ct = default)
     {
         if (string.Equals(serverName, registry.SelfName, StringComparison.OrdinalIgnoreCase))
@@ -235,13 +252,13 @@ public class ConsumerTools
 
         try
         {
-            IReadOnlyDictionary<string, object?>? args = null;
-            if (!string.IsNullOrWhiteSpace(arguments))
-            {
-                var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(arguments);
-                if (raw is not null)
-                    args = raw.ToDictionary(kvp => kvp.Key, kvp => (object?)(kvp.Value.ValueKind == JsonValueKind.String ? kvp.Value.GetString() : kvp.Value.GetRawText()));
-            }
+            if (!ToolProxyHandler.TryReadArgumentObject(arguments, "prompt", out var argumentObject, out var error))
+                return ErrorResult(error!);
+
+            IReadOnlyDictionary<string, object?>? args = argumentObject is { } obj
+                ? ToolProxyHandler.ObjectToDictionary(
+                    obj, v => v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText())
+                : null;
 
             var result = await proxy.GetPromptAsync(serverName, promptName, args, InvocationPath.GetPrompt, ct);
             return new CallToolResult
@@ -269,12 +286,6 @@ public class ConsumerTools
             return ErrorResult(
                 $"Prompt '{promptName}' on server '{serverName}' failed: {ex.Message}" +
                 (signature is null ? string.Empty : $" Arguments: {signature}"));
-        }
-        catch (JsonException ex) when (!ct.IsCancellationRequested)
-        {
-            return ErrorResult(
-                $"'arguments' must be the prompt's argument object encoded as a JSON string, for example " +
-                $"\"{{\\\"topic\\\": \\\"text\\\"}}\". You sent: {Truncate(arguments, 200)}. Parse error: {ex.Message}");
         }
     }
 

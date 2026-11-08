@@ -1,3 +1,4 @@
+using System.Text.Json;
 using McpAggregator.Core.Configuration;
 using McpAggregator.Core.Services;
 using McpAggregator.Core.Tools;
@@ -68,4 +69,8 @@ public class ServicesController : ControllerBase
     }
 }
 
-public record InvokeRequest(string? Arguments);
+/// <summary>
+/// Body of <c>POST /api/services/{name}/tools/{tool}/invoke</c>. <c>Arguments</c> is the tool's argument
+/// object, or a JSON string of it (issue #70); omit it or send null for no arguments.
+/// </summary>
+public record InvokeRequest(JsonElement? Arguments);

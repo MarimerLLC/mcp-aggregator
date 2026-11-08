@@ -325,7 +325,7 @@ public class ToolProxyIsErrorTests
         var proxy = harness.Proxy;
         var registry = harness.Registry;
         var invokeTool = McpServerTool.Create(
-            (string serverName, string toolName, string? arguments, CancellationToken ct)
+            (string serverName, string toolName, JsonElement? arguments, CancellationToken ct)
                 => ConsumerTools.InvokeTool(proxy, registry, serverName, toolName, arguments, ct),
             new McpServerToolCreateOptions { Name = "invoke_tool" });
 
@@ -352,7 +352,7 @@ public class ToolProxyIsErrorTests
         await using var harness = await CreateHarnessAsync();
 
         var result = await ConsumerTools.InvokeTool(harness.Proxy, harness.Registry,
-            "MCP-Aggregator", "update_skill", "{\"serverName\":\"adjutant\"}", CancellationToken.None);
+            "MCP-Aggregator", "update_skill", JsonSerializer.SerializeToElement(new { serverName = "adjutant" }), CancellationToken.None);
 
         Assert.IsTrue(result.IsError ?? false);
         var text = TextOf(result);

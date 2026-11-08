@@ -299,34 +299,145 @@ public class ToolProxyHandler
             JsonValueKind.Array => element.EnumerateArray()
                 .Select(ConvertJsonElement)
                 .ToList(),
-            JsonValueKind.Object => element.EnumerateObject()
-                .ToDictionary(p => p.Name, p => ConvertJsonElement(p.Value)),
+            JsonValueKind.Object => ObjectToDictionary(element, ConvertJsonElement),
             _ => element.GetRawText(),
         };
     }
 
     /// <summary>
-    /// Generic proxy path used by <c>invoke_tool</c> and the REST invoke endpoint: parses the
-    /// stringified JSON argument object, then shares everything else with the typed-wrapper path.
+    /// The properties of a JSON object as a dictionary. A repeated name keeps its last value, as
+    /// <see cref="JsonSerializer"/> does when it reads a dictionary; <c>ToDictionary</c> would throw
+    /// instead (PR #71 review).
+    /// </summary>
+    internal static Dictionary<string, object?> ObjectToDictionary(JsonElement obj, Func<JsonElement, object?> convert)
+    {
+        var result = new Dictionary<string, object?>();
+        foreach (var property in obj.EnumerateObject())
+            result[property.Name] = convert(property.Value);
+        return result;
+    }
+
+    /// <summary>
+    /// Reads the <c>arguments</c> value of <c>invoke_tool</c>, <c>get_prompt</c> and the REST invoke
+    /// endpoint (issue #70). Accepted: the argument object itself, a JSON string holding it, or
+    /// null / missing / a blank string (no arguments). Anything else yields an error message that
+    /// names what was received and shows both accepted forms; this never throws.
+    /// </summary>
+    /// <param name="value">The raw <c>arguments</c> value, or <see langword="null"/> when it was omitted.</param>
+    /// <param name="subject"><c>"tool"</c> or <c>"prompt"</c>: whose argument object the message talks about.</param>
+    /// <param name="argumentObject">The argument object (a JSON object element), or <see langword="null"/> for no arguments.</param>
+    /// <param name="error">The caller-facing message when the value is not accepted.</param>
+    internal static bool TryReadArgumentObject(
+        JsonElement? value,
+        string subject,
+        out JsonElement? argumentObject,
+        out string? error)
+    {
+        argumentObject = null;
+        error = null;
+
+        if (value is not { } element)
+            return true;
+
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Undefined:
+            case JsonValueKind.Null:
+                return true;
+
+            case JsonValueKind.Object:
+                argumentObject = element;
+                return true;
+
+            case JsonValueKind.String:
+                var text = element.GetString();
+                if (string.IsNullOrWhiteSpace(text))
+                    return true;
+
+                JsonElement parsed;
+                try
+                {
+                    using var doc = JsonDocument.Parse(text);
+                    parsed = doc.RootElement.Clone();
+                }
+                catch (JsonException ex)
+                {
+                    error = $"{ArgumentsShape(subject)} The string you sent is not valid JSON. " +
+                            $"You sent: {Truncate(text, 200)}. Parse error: {ex.Message}";
+                    return false;
+                }
+
+                if (parsed.ValueKind != JsonValueKind.Object)
+                {
+                    error = $"{ArgumentsShape(subject)} 'arguments' was a JSON string holding a JSON {KindName(parsed.ValueKind)}, " +
+                            $"not an object. You sent: {Truncate(text, 200)}.";
+                    return false;
+                }
+
+                argumentObject = parsed;
+                return true;
+
+            default:
+                error = $"{ArgumentsShape(subject)} You sent a JSON {KindName(element.ValueKind)}: {Truncate(element.GetRawText(), 200)}.";
+                return false;
+        }
+    }
+
+    private static string ArgumentsShape(string subject)
+    {
+        var example = subject == "prompt" ? "topic" : "query";
+        return $"'arguments' must be the {subject}'s argument object, for example {{\"{example}\": \"text\"}} " +
+               $"(a JSON string of it, \"{{\\\"{example}\\\": \\\"text\\\"}}\", is also accepted), or omitted for none.";
+    }
+
+    private static string KindName(JsonValueKind kind) => kind switch
+    {
+        JsonValueKind.Array => "array",
+        JsonValueKind.Number => "number",
+        JsonValueKind.True or JsonValueKind.False => "boolean",
+        JsonValueKind.String => "string",
+        JsonValueKind.Object => "object",
+        _ => "null",
+    };
+
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>
+    /// Generic proxy path used by <c>invoke_tool</c> and the REST invoke endpoint: reads the argument
+    /// object (or a JSON string of it, see <see cref="TryReadArgumentObject"/>), then shares everything
+    /// else with the typed-wrapper path. An unacceptable <paramref name="arguments"/> value comes back
+    /// as an <c>isError</c> result naming the problem; the downstream is not called.
     /// </summary>
     public async Task<CallToolResult> InvokeAsync(
         string serverName,
         string toolName,
-        string? argumentsJson,
+        JsonElement? arguments,
         CancellationToken ct = default)
     {
-        IReadOnlyDictionary<string, object?>? args = null;
-        if (!string.IsNullOrWhiteSpace(argumentsJson))
+        if (!TryReadArgumentObject(arguments, "tool", out var argumentObject, out var error))
         {
-            var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(argumentsJson);
-            if (raw is not null)
-            {
-                args = raw.ToDictionary(kvp => kvp.Key, kvp => ConvertJsonElement(kvp.Value));
-            }
+            _logger.LogInformation("Rejected 'arguments' for tool '{Tool}' on '{Server}': {Error}", toolName, serverName, error);
+            return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = error! }] };
         }
+
+        IReadOnlyDictionary<string, object?>? args = argumentObject is { } obj
+            ? ObjectToDictionary(obj, ConvertJsonElement)
+            : null;
 
         return await InvokeAsync(serverName, toolName, args, InvocationPath.InvokeTool, ct);
     }
+
+    /// <summary>
+    /// <see cref="InvokeAsync(string, string, JsonElement?, CancellationToken)"/> with the argument
+    /// object given as a JSON string.
+    /// </summary>
+    public Task<CallToolResult> InvokeAsync(
+        string serverName,
+        string toolName,
+        string? argumentsJson,
+        CancellationToken ct = default)
+        => InvokeAsync(serverName, toolName,
+            argumentsJson is null ? (JsonElement?)null : JsonSerializer.SerializeToElement(argumentsJson), ct);
 
     /// <summary>
     /// The single downstream call path. Timeout, retry, telemetry, the argument-schema hint on a

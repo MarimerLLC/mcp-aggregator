@@ -243,7 +243,7 @@ The aggregator's `SelfName` setting controls both the name shown in the index an
 | `list_services` | Concise index of all registered servers with tool names, wrapper names and descriptions |
 | `get_service_details` | Full tool schemas, prompt templates and resources for a specific server; activates its wrappers, prompts and resources in `Lazy` mode |
 | `get_service_skill` | Retrieve a server's skill document (markdown guide). If the server has changed since the document was written, the document starts with a notice listing what changed (see [docs/skill-maintenance.md](docs/skill-maintenance.md)) |
-| `invoke_tool` | Escape hatch: proxy a tool call to a downstream server with a stringified JSON argument object |
+| `invoke_tool` | Escape hatch: proxy a tool call to a downstream server with the tool's argument object (or a JSON string of it) |
 | `get_prompt` | Escape hatch: retrieve a rendered prompt template from a downstream server when the client cannot use MCP prompts |
 | `read_resource` | Escape hatch: read a downstream resource by its URI (downstream or aggregator form) when the client cannot use MCP resources |
 | `refresh_service` | Drop cached connection, tool, prompt and resource lists for a server and rebuild its wrappers, prompts and resources |

@@ -104,6 +104,14 @@ public static class McpServerBuilderExtensions
                 mcpOpts.ToolCollection = sharedTools;
             }
 
+            // invoke_tool and get_prompt take 'arguments' as the object or a JSON string of it
+            // (issue #70); the SDK's schema for that JsonElement parameter is untyped, so say so.
+            foreach (var name in ConsumerTools.ObjectOrStringArgumentTools)
+            {
+                if (sharedTools.TryGetPrimitive(name, out var tool))
+                    ConsumerTools.AdvertiseObjectOrStringArguments(tool);
+            }
+
             if (!ReferenceEquals(mcpOpts.PromptCollection, sharedPrompts))
             {
                 if (mcpOpts.PromptCollection is { } otherPrompts)
