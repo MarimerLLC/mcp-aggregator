@@ -79,6 +79,45 @@ public class SkillStore
         => SetCoreAsync(serverName, markdown, expectedSha256, whileLocked, ct);
 
     /// <summary>
+    /// Writes <paramref name="markdown"/> only if there is no document yet; returns false, changing
+    /// nothing, when one exists. The file is opened with <see cref="FileMode.CreateNew"/>, so the
+    /// existence check and the creation are one step even for another process writing to the same
+    /// directory.
+    /// </summary>
+    public async Task<bool> TryCreateAsync(string serverName, string markdown, CancellationToken ct = default)
+    {
+        if (markdown.Length > MaxSkillSizeBytes)
+            throw new AggregatorException($"Skill document exceeds maximum size of {MaxSkillSizeBytes} bytes.");
+
+        var path = GetPath(serverName);
+        var gate = LockFor(path);
+        await gate.WaitAsync(ct);
+        try
+        {
+            try
+            {
+                await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                await using var writer = new StreamWriter(stream);
+                await writer.WriteAsync(markdown.AsMemory(), ct);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                return false;
+            }
+
+            if (IsSelf(serverName))
+                await RecordShippedMarkerAsync(markdown, ct);
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        _logger.LogInformation("Saved skill document for '{Server}'", serverName);
+        return true;
+    }
+
+    /// <summary>
     /// Runs <paramref name="action"/> only if the current document still hashes to
     /// <paramref name="expectedSha256"/>, holding the document's lock for the check and the action, so no
     /// save or restore can change the text in between. Returns false, without running it, otherwise.

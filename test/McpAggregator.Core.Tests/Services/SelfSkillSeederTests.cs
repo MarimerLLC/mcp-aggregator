@@ -117,6 +117,45 @@ public class SelfSkillSeederTests
         Assert.AreEqual(ShippedSelfSkill.Hash(Release1), await store.GetShippedMarkerAsync(TestTimeout));
     }
 
+    // An edit saved between the seeder's checks and its write (another host on the same data
+    // directory, or update_skill arriving during startup) must survive (PR #73 review).
+
+    [TestMethod]
+    public async Task EditBetweenCheckAndUpgrade_IsNotOverwritten()
+    {
+        var (_, first) = Build(Release1);
+        await first.SeedAsync(TestTimeout);
+
+        var (store, second) = Build(Release2);
+        second.BeforeWriteForTesting = () => store.SetAsync(SelfName, "# Edited meanwhile\n", TestTimeout);
+
+        Assert.AreEqual(SelfSkillSeedOutcome.Kept, await second.SeedAsync(TestTimeout));
+        Assert.AreEqual("# Edited meanwhile\n", await store.GetAsync(SelfName, TestTimeout));
+    }
+
+    [TestMethod]
+    public async Task DocumentCreatedBetweenCheckAndCreate_IsNotOverwritten()
+    {
+        var (store, seeder) = Build(Release1);
+        seeder.BeforeWriteForTesting = () => store.SetAsync(SelfName, "# Written meanwhile\n", TestTimeout);
+
+        Assert.AreEqual(SelfSkillSeedOutcome.Kept, await seeder.SeedAsync(TestTimeout));
+        Assert.AreEqual("# Written meanwhile\n", await store.GetAsync(SelfName, TestTimeout));
+    }
+
+    [TestMethod]
+    public async Task EditBetweenCheckAndMarkerAdoption_IsNotOverwritten()
+    {
+        var (store, seeder) = Build(Release1);
+        await store.SetAsync(SelfName, Release1.ReplaceLineEndings("\r\n"), TestTimeout);
+        File.Delete(Path.Combine(TestHelpers.DefaultAggregatorOptions(_dataDir).SkillsDirectoryPath, $"{SelfName}.shipped.sha256"));
+        seeder.BeforeWriteForTesting = () => store.SetAsync(SelfName, "# Edited meanwhile\n", TestTimeout);
+
+        Assert.AreEqual(SelfSkillSeedOutcome.Kept, await seeder.SeedAsync(TestTimeout));
+        Assert.AreEqual("# Edited meanwhile\n", await store.GetAsync(SelfName, TestTimeout));
+        Assert.IsNull(await store.GetShippedMarkerAsync(TestTimeout), "The edit's save cleared the marker; nothing may set it back.");
+    }
+
     [TestMethod]
     public async Task NothingShipped_TouchesNothing()
     {
