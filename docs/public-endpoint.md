@@ -57,10 +57,15 @@ that cookie once you approve or deny.
 
 ### 1. Allow Funnel for the operator's proxies
 
-In the tailnet policy file:
+The Funnel ingress's proxy device must carry a tag the tailnet ACL permits for the operator, and that
+tag needs the `funnel` attribute. `k8s/ingress-public.yaml` pins the proxy's tag with
+`tailscale.com/tags: tag:k8s-operator`. Without that annotation the operator falls back to its
+`PROXY_TAGS` default, `tag:k8s`, which an ACL that doesn't grant `tag:k8s` rejects. The proxy then
+never comes up, and the reason only appears in the operator log. Use whatever tag your existing
+Tailscale ingresses carry, and grant it Funnel in the tailnet policy file:
 
 ```json
-"nodeAttrs": [{ "target": ["tag:k8s"], "attr": ["funnel"] }]
+"nodeAttrs": [{ "target": ["tag:k8s-operator"], "attr": ["funnel"] }]
 ```
 
 ### 2. Create a Google OAuth client
@@ -99,6 +104,11 @@ secret, the public listener rejects every request. Without the Google values it 
 and the authorize page says sign-in is not configured.
 
 ### 5. Deploy
+
+If a GitOps tool (Fleet, Argo CD, Flux) owns the deployment, make the same changes there and don't run
+`deploy.sh`. The changes are: port 8081 on the Deployment and Service, the optional
+`mcp-aggregator-public` secretRef, the three `PUBLICENDPOINT` ConfigMap keys, and the public Ingress.
+Applying the manifests by hand would leave the GitOps copy out of sync. Otherwise:
 
 ```bash
 ./k8s/deploy.sh          # applies ingress-public.yaml too

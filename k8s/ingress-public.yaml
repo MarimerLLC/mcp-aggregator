@@ -3,8 +3,11 @@
 # aggregator's public listener (port 8081), which serves only MCP + OAuth and requires a token.
 # The tailnet-only ingress.yaml (REST admin API, Scalar, unauthenticated MCP) is unchanged.
 #
-# Funnel must be allowed for the operator's proxy nodes in the tailnet policy file, e.g.
-#   "nodeAttrs": [{ "target": ["tag:k8s"], "attr": ["funnel"] }]
+# The proxy's tag must be one the tailnet ACL permits for the operator AND must carry the funnel
+# attribute in the tailnet policy file, e.g.
+#   "nodeAttrs": [{ "target": ["tag:k8s-operator"], "attr": ["funnel"] }]
+# Without tailscale.com/tags the operator falls back to its PROXY_TAGS default (tag:k8s); if the
+# ACL rejects that tag the proxy never comes up and the reason is only in the operator log.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -12,6 +15,7 @@ metadata:
   namespace: mcp-aggregator
   annotations:
     tailscale.com/funnel: "true"
+    tailscale.com/tags: tag:k8s-operator
 spec:
   ingressClassName: tailscale
   defaultBackend:
