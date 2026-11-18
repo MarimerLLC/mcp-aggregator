@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
@@ -200,9 +201,15 @@ public static class OAuthEndpoints
                     StatusCodes.Status503ServiceUnavailable);
             }
 
-            // Off to Google; its callback signs in the login cookie and comes back here.
+            // Off to Google; its callback signs in the login cookie and comes back here. The account
+            // chooser lets someone turned away as "not allowed" actually pick another account instead of
+            // Google silently signing the same one in again.
             return Results.Challenge(
-                new AuthenticationProperties { RedirectUri = context.Request.PathBase + context.Request.Path + context.Request.QueryString },
+                new GoogleChallengeProperties
+                {
+                    RedirectUri = context.Request.PathBase + context.Request.Path + context.Request.QueryString,
+                    Prompt = "select_account",
+                },
                 [GoogleScheme]);
         }
 
@@ -227,6 +234,9 @@ public static class OAuthEndpoints
         IOptionsMonitor<PublicEndpointOptions> options, IAntiforgery antiforgery, ILoggerFactory loggers)
     {
         var logger = loggers.CreateLogger(typeof(OAuthEndpoints));
+        if (!context.Request.HasFormContentType)
+            return ConsentPage.Error("Invalid request", "Expected the consent form. Start again from the application that sent you here.");
+
         var form = await context.Request.ReadFormAsync();
         var request = AuthorizeRequest.From(k => form[k]);
         var opts = options.CurrentValue;
@@ -259,7 +269,8 @@ public static class OAuthEndpoints
             return ErrorRedirect(redirectUri, request.State, opts, "access_denied", "The user denied the request.");
         }
 
-        var code = codes.Issue(request.ClientId!, redirectUri, request.CodeChallenge!, email, TokenService.Scope);
+        var code = codes.Issue(request.ClientId!, redirectUri, redirectUriSent: request.RedirectUri is not null,
+            request.CodeChallenge!, email, TokenService.Scope);
         logger.LogInformation("{Email} authorized OAuth client {ClientName} ({RedirectUri})", email, validated.Client!.ClientName, redirectUri);
 
         return SeeOther(QueryHelpers.AddQueryString(redirectUri, new Dictionary<string, string?>
@@ -325,7 +336,8 @@ public static class OAuthEndpoints
             {
                 if (!codes.TryRedeem(Field("code"), out var grant)
                     || !string.Equals(grant.ClientId, clientId, StringComparison.Ordinal)
-                    || !string.Equals(grant.RedirectUri, Field("redirect_uri") ?? grant.RedirectUri, StringComparison.Ordinal)
+                    // RFC 6749 §4.1.3: required, and identical, when the authorization request carried it.
+                    || !string.Equals(grant.RedirectUri, Field("redirect_uri") ?? (grant.RedirectUriSent ? null : grant.RedirectUri), StringComparison.Ordinal)
                     || !TokenService.VerifyPkce(Field("code_verifier"), grant.CodeChallenge)
                     || !tokens.IsAllowedEmail(grant.Subject))
                 {

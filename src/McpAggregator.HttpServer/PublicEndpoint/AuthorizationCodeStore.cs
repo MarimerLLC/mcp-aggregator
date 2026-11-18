@@ -8,6 +8,7 @@ namespace McpAggregator.HttpServer.PublicEndpoint;
 public sealed record AuthorizationCode(
     string ClientId,
     string RedirectUri,
+    bool RedirectUriSent,
     string CodeChallenge,
     string Subject,
     string Scope,
@@ -21,7 +22,9 @@ public sealed class AuthorizationCodeStore(IOptionsMonitor<PublicEndpointOptions
 {
     private readonly ConcurrentDictionary<string, AuthorizationCode> _codes = new(StringComparer.Ordinal);
 
-    public string Issue(string clientId, string redirectUri, string codeChallenge, string subject, string scope)
+    /// <param name="redirectUriSent">Whether the authorization request named the redirect URI (rather
+    /// than defaulting to the client's only one); the token request must then repeat it.</param>
+    public string Issue(string clientId, string redirectUri, bool redirectUriSent, string codeChallenge, string subject, string scope)
     {
         var now = time.GetUtcNow();
         foreach (var (key, value) in _codes)
@@ -31,7 +34,7 @@ public sealed class AuthorizationCodeStore(IOptionsMonitor<PublicEndpointOptions
         }
 
         var code = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32));
-        _codes[code] = new AuthorizationCode(clientId, redirectUri, codeChallenge, subject, scope,
+        _codes[code] = new AuthorizationCode(clientId, redirectUri, redirectUriSent, codeChallenge, subject, scope,
             now + options.CurrentValue.AuthorizationCodeLifetime);
         return code;
     }

@@ -73,9 +73,6 @@ public static class McpServerBuilderExtensions
                 }
             });
 
-        // Give the aggregator's own tools the same self-correcting argument help that
-        // ToolProxyHandler gives proxied downstream calls: without this, a binding failure reaches
-        // the caller as a bare "An error occurred invoking 'X'".
         // Callers on the public endpoint never see or reach the administrative tools. Registered
         // before the error filter so it is the outer one: a rejected admin call never gets as far
         // as the unknown-tool hint (which would advertise show_admin_tools). AdminToolSet is
@@ -90,6 +87,9 @@ public static class McpServerBuilderExtensions
                     next => PublicCallerAdminFilter.CreateCallFilter(next, adminTools, logger));
             });
 
+        // Give the aggregator's own tools the same self-correcting argument help that
+        // ToolProxyHandler gives proxied downstream calls: without this, a binding failure reaches
+        // the caller as a bare "An error occurred invoking 'X'".
         services.AddOptions<McpServerOptions>()
             .Configure<ILoggerFactory>((mcpOpts, loggerFactory) =>
             {

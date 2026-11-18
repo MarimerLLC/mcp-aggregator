@@ -39,9 +39,12 @@ dotnet run --project src/McpAggregator.StdioServer     # Run stdio server
 `McpAggregator:PublicEndpoint` (off by default) adds a second Kestrel listener (`ListenUrl`, appended to the
 private URLs / `HTTP_PORTS`) behind Tailscale Funnel (`k8s/ingress-public.yaml`). `PublicEndpointMiddleware`
 rewrites scheme/host to `BaseUrl`, serves only `/` (MCP, bearer required via `PublicBearerHandler`) and the
-OAuth paths, and 404s the OAuth paths on the private listener. `UseAuthentication` runs only on the public port,
-and the Google scheme is registered only when its client ID/secret are set (its handler validates options on every
-request). `OAuthEndpoints` is a single-user OAuth 2.1 AS (RFC 9728/8414/7591, PKCE S256, refresh rotation);
+OAuth paths, and 404s the OAuth paths on the private listener. `UseAuthentication` is called on the top-level
+pipeline right after that middleware (never in a `UseWhen` branch: WebApplication would then auto-insert its own copy
+ahead of the middleware, handling the Google callback before the scheme/host rewrite and on the private port). The
+middleware captures the port and `BaseUrl` at startup, never from `IOptionsMonitor`. The Google scheme is registered
+only when its client ID/secret are set (its handler validates options on every request). `OAuthEndpoints` is a
+single-user OAuth 2.1 AS (RFC 9728/8414/7591, PKCE S256, refresh tokens re-issued on use but not single-use);
 `TokenService` makes client IDs, access and refresh tokens Data Protection payloads (keys in `{DataDirectory}/keys`,
 one purpose per kind) and checks PATs by SHA-256; `AuthorizationCodeStore` is in-memory (single replica).
 Revocation: `TokenGeneration`, `AllowedEmails`. `ServeCommand` keeps logging/telemetry; services and pipeline

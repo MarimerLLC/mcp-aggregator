@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace McpAggregator.HttpServer.PublicEndpoint;
@@ -33,7 +34,7 @@ public static class PublicEndpointExtensions
         services.Configure<PublicEndpointOptions>(section);
         services.AddSingleton<TokenService>();
         services.AddSingleton<AuthorizationCodeStore>();
-        services.AddSingleton(TimeProvider.System);
+        services.TryAddSingleton(TimeProvider.System);
 
         var dataDirectory = builder.Configuration[$"{AggregatorOptions.SectionName}:DataDirectory"] ?? "data";
         services.AddDataProtection()
@@ -99,11 +100,15 @@ public static class PublicEndpointExtensions
     public static void UsePublicEndpoint(this WebApplication app)
     {
         var options = app.Services.GetRequiredService<IOptions<PublicEndpointOptions>>().Value;
-        var publicPort = options.ListenPort;
 
         app.UseMiddleware<PublicEndpointMiddleware>();
-        // Handles the Google callback path; never runs for the private listener.
-        app.UseWhen(ctx => ctx.Connection.LocalPort == publicPort, branch => branch.UseAuthentication());
+        // Handles the Google callback path. Called on the top-level pipeline, after the middleware above,
+        // on purpose: WebApplication auto-inserts UseAuthentication ahead of every user middleware unless
+        // the top-level builder already has it (a UseWhen branch does not count), and that early copy
+        // would handle the callback before the scheme/host rewrite (Google redirect_uri mismatch) and
+        // on the private listener too. Here the middleware has already 404ed OAuth paths on the private
+        // listener; with no default scheme nothing else authenticates.
+        app.UseAuthentication();
         app.MapOAuthEndpoints();
 
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(PublicEndpointExtensions));

@@ -14,14 +14,18 @@ namespace McpAggregator.HttpServer.PublicEndpoint;
 /// authorization server lives only at the public issuer URL.</item>
 /// </list>
 /// </summary>
-public sealed class PublicEndpointMiddleware(RequestDelegate next, IOptionsMonitor<PublicEndpointOptions> options)
+public sealed class PublicEndpointMiddleware(RequestDelegate next, IOptions<PublicEndpointOptions> options)
 {
+    // Captured once: Kestrel binds the listener at startup, so a reloaded ListenUrl must never make the
+    // still-bound public port look private (unauthenticated, admin API) — and nothing is parsed per request.
+    private readonly int _publicPort = options.Value.ListenPort;
+    private readonly Uri _baseUri = new(options.Value.BaseUrlTrimmed);
+
     public async Task InvokeAsync(HttpContext context)
     {
-        var opts = options.CurrentValue;
         var path = context.Request.Path;
 
-        if (context.Connection.LocalPort != opts.ListenPort)
+        if (context.Connection.LocalPort != _publicPort)
         {
             if (OAuthEndpoints.IsOAuthPath(path))
             {
@@ -35,9 +39,8 @@ public sealed class PublicEndpointMiddleware(RequestDelegate next, IOptionsMonit
 
         // The TLS-terminating proxy (Tailscale Funnel) forwards plain HTTP; make the request look
         // like what the client actually used so redirect URIs and Secure cookies come out right.
-        var baseUri = new Uri(opts.BaseUrlTrimmed);
-        context.Request.Scheme = baseUri.Scheme;
-        context.Request.Host = new HostString(baseUri.Authority);
+        context.Request.Scheme = _baseUri.Scheme;
+        context.Request.Host = new HostString(_baseUri.Authority);
 
         if (OAuthEndpoints.IsOAuthPath(path))
         {

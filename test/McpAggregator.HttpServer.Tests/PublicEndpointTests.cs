@@ -44,6 +44,7 @@ public sealed partial class PublicEndpointTests
     [DataRow(OAuthEndpoints.ProtectedResourceMetadataPath)]
     [DataRow(OAuthEndpoints.AuthorizationServerMetadataPath)]
     [DataRow(OAuthEndpoints.AuthorizePath)]
+    [DataRow(OAuthEndpoints.GoogleCallbackPath + "?state=x&code=y")]
     public async Task Private_listener_has_no_oauth_endpoints(string path)
     {
         using var http = _host.CreateHttpClient(_host.PrivateUrl);
@@ -170,6 +171,11 @@ public sealed partial class PublicEndpointTests
         // A wrong verifier fails and burns the code.
         var bad = await TokenAsync(http, new() { ["grant_type"] = "authorization_code", ["client_id"] = clientId, ["code"] = code, ["redirect_uri"] = PublicEndpointHost.ClaudeCallback, ["code_verifier"] = NewPkce().Verifier });
         Assert.AreEqual(HttpStatusCode.BadRequest, bad.Status);
+
+        // The authorization request named redirect_uri, so the token request must repeat it.
+        code = await AuthorizeAsync(http, clientId, challenge, state: "xyz");
+        var noRedirect = await TokenAsync(http, new() { ["grant_type"] = "authorization_code", ["client_id"] = clientId, ["code"] = code, ["code_verifier"] = verifier });
+        Assert.AreEqual(HttpStatusCode.BadRequest, noRedirect.Status);
 
         code = await AuthorizeAsync(http, clientId, challenge, state: "xyz");
         var issued = await TokenAsync(http, new() { ["grant_type"] = "authorization_code", ["client_id"] = clientId, ["code"] = code, ["redirect_uri"] = PublicEndpointHost.ClaudeCallback, ["code_verifier"] = verifier });
