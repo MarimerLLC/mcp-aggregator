@@ -9,5 +9,5 @@ COPY --from=build /app .
 RUN mkdir -p /app/logs && chmod 777 /app/logs
 VOLUME /data
 ENV MCPAGGREGATOR__DATADIRECTORY=/data
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["dotnet", "McpAggregator.HttpServer.dll"]

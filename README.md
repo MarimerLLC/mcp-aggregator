@@ -517,6 +517,15 @@ Kubernetes manifests are provided in the `k8s/` directory, targeting a k3s clust
 
 The deploy script automatically copies skill documents from `data/skills/` into the pod's persistent volume after each deployment. AI secrets (API keys) should be created directly via `kubectl create secret` — they are not stored in the manifests.
 
+### Public endpoint (claude.ai connectors and cloud clients)
+
+The HTTP host can open a second, internet-facing listener, published through Tailscale Funnel by `k8s/ingress-public.yaml`. It serves only MCP plus a built-in OAuth server and requires a bearer token on every request:
+
+- **claude.ai custom connectors** use OAuth. You sign in with Google, the account must be allow-listed, and you approve the connector.
+- **Header-capable clients** such as Claude Code (local or cloud) can use a personal access token minted with `McpAggregator.HttpServer new-pat --name <label>`.
+
+Administrative tools are never available on the public listener. The tailnet endpoint, the REST API and Scalar are unchanged. Setup, client configuration and revocation are covered in [docs/public-endpoint.md](docs/public-endpoint.md).
+
 ### Claude Code Integration
 
 Add the aggregator as a stdio MCP server in your Claude Code configuration:
@@ -553,7 +562,7 @@ The MCP endpoint is mapped at the server root (`/`), not `/mcp`.
 
 ### Claude Desktop Integration
 
-Claude Desktop only launches stdio MCP servers from its config file, so a remote aggregator (e.g. the Kubernetes deployment behind Tailscale) is bridged with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote). Custom connectors under Settings → Connectors won't work for a tailnet-only URL, because those are reached from Anthropic's cloud rather than your machine.
+Claude Desktop only launches stdio MCP servers from its config file, so a remote aggregator (e.g. the Kubernetes deployment behind Tailscale) is bridged with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote). Custom connectors under Settings → Connectors won't work for a tailnet-only URL, because those are reached from Anthropic's cloud rather than your machine; use the [public endpoint](docs/public-endpoint.md) for that.
 
 Install `mcp-remote` globally (requires Node.js):
 

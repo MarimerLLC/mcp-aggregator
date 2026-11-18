@@ -6,6 +6,7 @@
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/McpAggregator.Core.Tests/McpAggregator.Core.Tests.csproj" />
+    <Project Path="test/McpAggregator.HttpServer.Tests/McpAggregator.HttpServer.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/McpAggregator.Measure/McpAggregator.Measure.csproj" />

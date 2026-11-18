@@ -11,3 +11,8 @@ data:
   ASPNETCORE_URLS: http://+:8080
   MCPAGGREGATOR__DATADIRECTORY: /data
   OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy.loki.svc.cluster.local:4317
+  # Internet-facing listener (Tailscale Funnel via ingress-public.yaml). Secrets live in the
+  # mcp-aggregator-public Secret; see docs/public-endpoint.md.
+  MCPAGGREGATOR__PUBLICENDPOINT__ENABLED: "true"
+  MCPAGGREGATOR__PUBLICENDPOINT__LISTENURL: http://+:8081
+  MCPAGGREGATOR__PUBLICENDPOINT__BASEURL: https://mcp-aggregator-public.tail920062.ts.net

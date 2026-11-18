@@ -1,0 +1,24 @@
+# Internet-facing endpoint for claude.ai custom connectors and other cloud clients.
+# Tailscale Funnel publishes https://mcp-aggregator-public.<tailnet>.ts.net and forwards to the
+# aggregator's public listener (port 8081), which serves only MCP + OAuth and requires a token.
+# The tailnet-only ingress.yaml (REST admin API, Scalar, unauthenticated MCP) is unchanged.
+#
+# Funnel must be allowed for the operator's proxy nodes in the tailnet policy file, e.g.
+#   "nodeAttrs": [{ "target": ["tag:k8s"], "attr": ["funnel"] }]
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-aggregator-public
+  namespace: mcp-aggregator
+  annotations:
+    tailscale.com/funnel: "true"
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: mcp-aggregator
+      port:
+        number: 8081
+  tls:
+    - hosts:
+        - mcp-aggregator-public

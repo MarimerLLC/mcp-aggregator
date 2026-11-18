@@ -31,11 +31,18 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: public
+              containerPort: 8081
           envFrom:
             - configMapRef:
                 name: mcp-aggregator-config
             - secretRef:
                 name: mcp-aggregator-ai
+            # Google OAuth client, allowed account(s) and PAT hashes for the public endpoint.
+            # Optional: without it the public endpoint rejects every request.
+            - secretRef:
+                name: mcp-aggregator-public
+                optional: true
           volumeMounts:
             - name: data
               mountPath: /data
