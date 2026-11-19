@@ -38,6 +38,12 @@ kubectl apply -f "$SCRIPT_DIR/pvc.yaml"
 kubectl apply -f "$SCRIPT_DIR/deployment.yaml"
 kubectl apply -f "$SCRIPT_DIR/service.yaml"
 kubectl apply -f "$SCRIPT_DIR/ingress.yaml"
+kubectl apply -f "$SCRIPT_DIR/ingress-public.yaml"
+if ! kubectl get secret mcp-aggregator-public -n "$NAMESPACE" >/dev/null 2>&1; then
+  echo ""
+  echo "NOTE: secret 'mcp-aggregator-public' not found; the public endpoint will reject every request."
+  echo "      See docs/public-endpoint.md to create it."
+fi
 
 echo ""
 echo "Waiting for rollout..."
@@ -48,6 +54,7 @@ copy_skills
 echo ""
 echo "Deployment complete!"
 echo "Access at: https://mcp-aggregator.tail920062.ts.net"
+echo "Public (Funnel, token required): https://mcp-aggregator-public.tail920062.ts.net"
 echo ""
 echo "Verify with:"
 echo "  kubectl get pods -n mcp-aggregator"

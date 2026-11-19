@@ -4,7 +4,8 @@
 
 - `src/McpAggregator.Core/` — Shared library: models, services, MCP tools, storage
 - `src/McpAggregator.StdioServer/` — Stdio MCP host (console app)
-- `src/McpAggregator.HttpServer/` — HTTP/SSE MCP + REST API host (web app)
+- `src/McpAggregator.HttpServer/` — HTTP/SSE MCP + REST API host (web app), optional public OAuth endpoint
+- `test/McpAggregator.Core.Tests/`, `test/McpAggregator.HttpServer.Tests/` — MSTest suites (CI runs both)
 - `data/` — Runtime data directory (registry.json, skills/)
 
 ## Build & Run
@@ -28,6 +29,27 @@ dotnet run --project src/McpAggregator.StdioServer     # Run stdio server
 6. **`ServerInstructions` is the hand-written orientation in `AggregatorInstructions`** (ceiling 6 KB, pinned
    by `ServerInstructionsTests`); the skill document is never embedded in the handshake, it stays behind
    `get_service_skill(serverName: "mcp-aggregator")` (issue #44).
+7. **Public-endpoint callers never reach admin tools.** The HTTP host's public listener stamps
+   `AggregatorClaims.Endpoint = public` on the caller; `PublicCallerAdminFilter` (outermost `tools/list` and
+   `tools/call` filters) is the only gate, so any new path that exposes admin tools must stay behind those
+   pipelines. Tell the listeners apart by `Connection.LocalPort`, never by headers.
+
+## Public endpoint (HTTP host)
+
+`McpAggregator:PublicEndpoint` (off by default) adds a second Kestrel listener (`ListenUrl`, appended to the
+private URLs / `HTTP_PORTS`) behind Tailscale Funnel (`k8s/ingress-public.yaml`). `PublicEndpointMiddleware`
+rewrites scheme/host to `BaseUrl`, serves only `/` (MCP, bearer required via `PublicBearerHandler`) and the
+OAuth paths, and 404s the OAuth paths on the private listener. `UseAuthentication` is called on the top-level
+pipeline right after that middleware (never in a `UseWhen` branch: WebApplication would then auto-insert its own copy
+ahead of the middleware, handling the Google callback before the scheme/host rewrite and on the private port). The
+middleware captures the port and `BaseUrl` at startup, never from `IOptionsMonitor`. The Google scheme is registered
+only when its client ID/secret are set (its handler validates options on every request). `OAuthEndpoints` is a
+single-user OAuth 2.1 AS (RFC 9728/8414/7591, PKCE S256, refresh tokens re-issued on use but not single-use);
+`TokenService` makes client IDs, access and refresh tokens Data Protection payloads (keys in `{DataDirectory}/keys`,
+one purpose per kind) and checks PATs by SHA-256; `AuthorizationCodeStore` is in-memory (single replica).
+Revocation: `TokenGeneration`, `AllowedEmails`. `ServeCommand` keeps logging/telemetry; services and pipeline
+are in `HttpHost` so `test/McpAggregator.HttpServer.Tests` runs the real app on two loopback ports (Google
+replaced by `TestLoginHandler`). `new-pat` mints PATs. Design and setup: `docs/public-endpoint.md`.
 
 ## Typed wrapper tools (issue #39), proxied prompts (issue #40) and bridged resources (issue #45)
 

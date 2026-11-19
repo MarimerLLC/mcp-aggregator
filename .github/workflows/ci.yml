@@ -24,6 +24,9 @@ jobs:
       - name: Test
         run: dotnet test test/McpAggregator.Core.Tests --logger "trx" --results-directory TestResults
 
+      - name: Test (HTTP host)
+        run: dotnet test test/McpAggregator.HttpServer.Tests --logger "trx" --results-directory TestResults
+
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()

@@ -163,7 +163,9 @@ public class AggregatorToolErrorFilterTests
         using var provider = services.BuildServiceProvider();
         var options = provider.GetRequiredService<IOptions<McpServerOptions>>().Value;
 
-        Assert.AreEqual(1, options.Filters.Request.CallToolFilters.Count);
+        // The public-caller admin gate (outer) and this error filter.
+        Assert.AreEqual(2, options.Filters.Request.CallToolFilters.Count);
+        Assert.AreEqual(1, options.Filters.Request.ListToolsFilters.Count);
     }
 
     [TestMethod]
